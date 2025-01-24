@@ -86,9 +86,8 @@
 #include "VideoDecoderUVD.h"
 #include "Factory.h"
 
-#include "rgy_level_h264.h"
+#include "rgy_level.h"
 #include "rgy_level_hevc.h"
-#include "rgy_level_av1.h"
 
 static const int VBV_BUFSIZE_MAX_Kbit = 500000;
 
@@ -2287,41 +2286,70 @@ RGY_ERR VCECore::initEncoder(VCEParam *prm) {
     if (nGOPLen == 0) {
         nGOPLen = (int)(m_encFps.n() / (double)m_encFps.d() + 0.5) * 10;
     }
+    // levelのチェック
+    {
+        auto codecLevel = createCodecLevel(prm->codec);
+        const int codecProfile = prm->codecParam[prm->codec].nProfile;
+        const bool hevc_high_tier = prm->codecParam[prm->codec].nTier == AMF_VIDEO_ENCODER_HEVC_TIER_HIGH;
+        const int level = prm->codecParam[prm->codec].nLevel;
+        if (level != codecLevel->level_auto()) {
+            const int required_level = codecLevel->calc_auto_level(m_encWidth, m_encHeight, 0, false,
+                m_encFps.n(), m_encFps.d(), codecProfile, hevc_high_tier, 0, 0, 1, 1);
+            if (level < required_level) {
+                PrintMes(RGY_LOG_WARN, _T("Level %s does not support the current settings (%s @ %s, %dx%d, %d/%d fps), switching level selection to auto.\n"),
+                    get_cx_desc(get_level_list(prm->codec), level),
+                    CodecToStr(prm->codec).c_str(), get_cx_desc(get_profile_list(prm->codec), codecProfile),
+                    m_encWidth, m_encHeight, m_encFps.n(), m_encFps.d());
+                prm->codecParam[prm->codec].nLevel = get_cx_value(get_level_list(prm->codec), _T("auto"));
+            } else {
+                // refの制限を超えている場合、refを下げる
+                const int maxRef = codecLevel->get_max_ref(m_encWidth, m_encHeight, level, codecProfile);
+                if (prm->refFrames.has_value() && prm->refFrames.value() > maxRef) {
+                    PrintMes(RGY_LOG_WARN, _T("Ref frames is lowered %d -> %d due to level %s restriction.\n"), prm->refFrames.value(), maxRef, get_cx_desc(get_level_list(prm->codec), level));
+                    prm->refFrames = maxRef;
+                }
+                // 最大bitrateの制限を超えている場合、最大bitrateを下げる
+                if (prm->rateControl != get_codec_cqp(prm->codec)) {
+                    int max_bitrate_kbps = codecLevel->get_max_bitrate(level, codecProfile, hevc_high_tier);
+                    if ((int)prm->nBitrate > max_bitrate_kbps) {
+                        PrintMes(RGY_LOG_WARN, _T("Bitrate is lowered %d -> %d due to level %s restriction.\n"), prm->nBitrate, max_bitrate_kbps, get_cx_desc(get_level_list(prm->codec), level));
+                        prm->nBitrate = max_bitrate_kbps;
+                    }
+                    if ((int)prm->nMaxBitrate > max_bitrate_kbps) {
+                        PrintMes(RGY_LOG_WARN, _T("Max bitrate is lowered %d -> %d due to level %s restriction.\n"), prm->nMaxBitrate, max_bitrate_kbps, get_cx_desc(get_level_list(prm->codec), level));
+                        prm->nMaxBitrate = max_bitrate_kbps;
+                    }
+                    if (prm->codec == RGY_CODEC_H264) {
+                        int max_vbv_buffer_size = codecLevel->get_max_vbv_buf(level, codecProfile);
+                        if ((int)prm->nVBVBufferSize > max_vbv_buffer_size) {
+                            PrintMes(RGY_LOG_WARN, _T("VBV buffer size is lowered %d -> %d due to level %s restriction.\n"), prm->nVBVBufferSize, max_vbv_buffer_size, get_cx_desc(get_level_list(prm->codec), level));
+                            prm->nVBVBufferSize = max_vbv_buffer_size;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     //VCEにはlevelを自動で設定してくれる機能はないようで、"0"などとするとエラー終了してしまう。
     if (prm->codecParam[prm->codec].nLevel == 0 || prm->nMaxBitrate == 0) {
+        auto codecLevel = createCodecLevel(prm->codec);
+        const int profile = prm->codecParam[prm->codec].nProfile;
+        const bool hevc_high_tier = prm->codecParam[prm->codec].nTier == AMF_VIDEO_ENCODER_HEVC_TIER_HIGH;
         int level = prm->codecParam[prm->codec].nLevel;
         int max_bitrate_kbps = prm->nMaxBitrate;
         int vbv_bufsize_kbps = prm->nVBVBufferSize;
-        if (prm->codec == RGY_CODEC_H264) {
-            const int profile = prm->codecParam[prm->codec].nProfile;
-            if (level == 0) {
-                level = calc_auto_level_h264(m_encWidth, m_encHeight, prm->refFrames.value_or(0), false,
-                    m_encFps.n(), m_encFps.d(), profile, max_bitrate_kbps, vbv_bufsize_kbps);
+        if (level == codecLevel->level_auto()) {
+            level = codecLevel->calc_auto_level(m_encWidth, m_encHeight, prm->refFrames.value_or(0), false,
+                m_encFps.n(), m_encFps.d(), profile, hevc_high_tier, max_bitrate_kbps, vbv_bufsize_kbps, 1, 1);
+            if (prm->codec == RGY_CODEC_H264) {
                 //なんかLevel4.0以上でないと設定に失敗する場合がある
                 level = std::max(level, 40);
             }
-            get_vbv_value_h264(&max_bitrate_kbps, &vbv_bufsize_kbps, level, profile);
-        } else if (prm->codec == RGY_CODEC_HEVC) {
-            const bool high_tier = prm->codecParam[prm->codec].nTier == AMF_VIDEO_ENCODER_HEVC_TIER_HIGH;
-            if (level == 0) {
-                level = calc_auto_level_hevc(m_encWidth, m_encHeight, prm->refFrames.value_or(0),
-                    m_encFps.n(), m_encFps.d(), high_tier, max_bitrate_kbps);
-            }
-            max_bitrate_kbps = get_max_bitrate_hevc(level, high_tier);
-            vbv_bufsize_kbps = max_bitrate_kbps;
-        } else if (prm->codec == RGY_CODEC_AV1) {
-            const int profile = prm->codecParam[prm->codec].nProfile;
-            if (level == 0) {
-                level = calc_auto_level_av1(m_encWidth, m_encHeight, prm->refFrames.value_or(0),
-                    m_encFps.n(), m_encFps.d(), profile, max_bitrate_kbps, 1, 1);
-            }
-            max_bitrate_kbps = get_max_bitrate_av1(level, profile);
-            vbv_bufsize_kbps = max_bitrate_kbps;
-        } else {
-            max_bitrate_kbps = VCE_DEFAULT_MAX_BITRATE;
-            vbv_bufsize_kbps = VCE_DEFAULT_MAX_BITRATE;
         }
-        if (prm->codecParam[prm->codec].nLevel == 0) {
+        max_bitrate_kbps = codecLevel->get_max_bitrate(level, profile, hevc_high_tier);
+        vbv_bufsize_kbps = (prm->codec == RGY_CODEC_H264) ? codecLevel->get_max_vbv_buf(level, profile) : max_bitrate_kbps;
+        if (prm->codecParam[prm->codec].nLevel == codecLevel->level_auto()) {
             prm->codecParam[prm->codec].nLevel = (int16_t)level;
         }
         if (prm->nMaxBitrate == 0) {

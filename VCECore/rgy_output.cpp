@@ -194,14 +194,8 @@ RGY_ERR RGYOutput::InitVideoBsf(const VideoInfo *videoOutputInfo) {
         || (ENCODER_QSV
             && (videoOutputInfo->codec == RGY_CODEC_H264 || videoOutputInfo->codec == RGY_CODEC_HEVC || videoOutputInfo->codec == RGY_CODEC_AV1)
             && videoOutputInfo->vui.chromaloc != 0)
-        || (ENCODER_VCEENC
-            && (videoOutputInfo->codec == RGY_CODEC_HEVC // HEVCの時は常に上書き
-                || (videoOutputInfo->vui.format != 5
-                    || videoOutputInfo->vui.colorprim != 2
-                    || videoOutputInfo->vui.transfer != 2
-                    || videoOutputInfo->vui.matrix != 2
-                    || videoOutputInfo->vui.chromaloc != 0)
-                || (videoOutputInfo->codec == RGY_CODEC_AV1 && videoOutputInfo->vui.colorrange == RGY_COLORRANGE_FULL)))
+        || (ENCODER_VCEENC // VCEEncの場合、常に上書き
+            && (videoOutputInfo->codec == RGY_CODEC_H264 || videoOutputInfo->codec == RGY_CODEC_HEVC || videoOutputInfo->codec == RGY_CODEC_AV1))
         || (ENCODER_MPP
             && ((videoOutputInfo->codec == RGY_CODEC_H264 || videoOutputInfo->codec == RGY_CODEC_HEVC) // HEVCの時は常に上書き)
                 || (videoOutputInfo->sar[0] * videoOutputInfo->sar[1] > 0
@@ -558,7 +552,7 @@ RGY_ERR RGYOutputBSF::applyBitstreamFilter(RGYBitstream *bitstream) {
                 }
             }
         }
-        if (target_nal_start > 0) {
+        if (target_nal_start >= 0) {
             const ptrdiff_t header_size = (ptrdiff_t)(nal_list[target_nal_end].ptr - nal_list[target_nal_start].ptr) + nal_list[target_nal_end].size;
             if (header_size <= 0) {
                 AddMessage(RGY_LOG_ERROR, _T("Unexpected error occured running bitstream filter.\n"));

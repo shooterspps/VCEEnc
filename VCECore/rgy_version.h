@@ -29,9 +29,9 @@
 #ifndef __RGY_VERSION_H__
 #define __RGY_VERSION_H__
 
-#define VER_FILEVERSION             0,8,28,0
-#define VER_STR_FILEVERSION          "8.28"
-#define VER_STR_FILEVERSION_TCHAR _T("8.28")
+#define VER_FILEVERSION             0,8,29,0
+#define VER_STR_FILEVERSION          "8.29"
+#define VER_STR_FILEVERSION_TCHAR _T("8.29")
 
 
 #ifdef _M_IX86
@@ -79,6 +79,7 @@ const char *get_encoder_version();
 #define AV_CHANNEL_LAYOUT_STRUCT_AVAIL 1
 #define AV_FRAME_DURATION_AVAIL 1
 #define AVCODEC_PAR_CODED_SIDE_DATA_AVAIL 1
+#define AVS_INTERF_VER 11
 
 #define ENABLE_KEYFRAME_INSERT 0
 

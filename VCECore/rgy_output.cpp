@@ -251,7 +251,7 @@ RGY_ERR RGYOutput::InitVideoBsf(const VideoInfo *videoOutputInfo) {
         }
         if (ENCODER_VCEENC || ENCODER_MPP) {
             // HEVCの10bitの時、エンコーダがおかしなVUIを設定することがあるのでこれを常に上書き
-            const bool override_always = ENCODER_VCEENC && (videoOutputInfo->codec == RGY_CODEC_HEVC || videoOutputInfo->codec == RGY_CODEC_AV1);
+            const bool override_always = ENCODER_VCEENC;
             if (override_always || videoOutputInfo->vui.format != 5 /*undef*/) {
                 if (videoOutputInfo->codec == RGY_CODEC_H264 || videoOutputInfo->codec == RGY_CODEC_HEVC) {
                     av_dict_set_int(&bsfPrm, "video_format", videoOutputInfo->vui.format, 0);
@@ -1215,7 +1215,7 @@ RGY_ERR initWriters(
         writerPrm.bVideoDtsUnavailable    = videoDtsUnavailable;
         writerPrm.threadOutput            = ctrl->threadOutput;
         writerPrm.threadAudio             = ctrl->threadAudio;
-        writerPrm.threadParamOutput       = ctrl->threadParams.get(RGYThreadType::OUTUT);
+        writerPrm.threadParamOutput       = ctrl->threadParams.get(RGYThreadType::OUTPUT);
         writerPrm.threadParamAudio        = ctrl->threadParams.get(RGYThreadType::AUDIO);
         writerPrm.bufSizeMB               = ctrl->outputBufSizeMB;
         writerPrm.audioResampler          = common->audioResampler;
@@ -1621,7 +1621,7 @@ RGY_ERR initWriters(
                 AvcodecWriterPrm writerAudioPrm;
                 writerAudioPrm.threadOutput   = ctrl->threadOutput;
                 writerAudioPrm.threadAudio    = ctrl->threadAudio;
-                writerAudioPrm.threadParamOutput = ctrl->threadParams.get(RGYThreadType::OUTUT);
+                writerAudioPrm.threadParamOutput = ctrl->threadParams.get(RGYThreadType::OUTPUT);
                 writerAudioPrm.threadParamAudio  = ctrl->threadParams.get(RGYThreadType::AUDIO);
                 writerAudioPrm.bufSizeMB      = ctrl->outputBufSizeMB;
                 writerAudioPrm.outputFormat   = pAudioSelect->extractFormat;

@@ -190,8 +190,7 @@ tstring encoder_help() {
         _T("-c,--codec <string>             set encode codec\n")
         _T("                                 - h264(default), hevc, av1\n")
         _T("-u,--preset <string>            set quality preset\n")
-        _T("                                 balanced(default), fast, slow\n")
-        _T("                                 slower(for AV1 only)\n")
+        _T("                                 balanced(default), fast, slow, slower\n")
         _T("   --cqp <int> or               encode in Constant QP, default %d:%d:%d\n")
         _T("         <int>:<int>:<int>      set qp value for i:p:b frame\n")
         _T("   --cbr <int>                  set bitrate in CBR mode (kbps)\n")
@@ -735,11 +734,12 @@ int parse_one_option(const TCHAR *option_name, const TCHAR* strInput[], int& i, 
             print_cmd_error_invalid_value(option_name, strInput[i]);
             return 1;
         } else if (value < 0) {
-            print_cmd_error_invalid_value(option_name, strInput[i], _T("bitrate should be positive value."));
+            print_cmd_error_invalid_value(option_name, strInput[i], _T("qvbr should be positive value."));
             return 1;
         }
         pParams->rateControl = AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_QUALITY_VBR;
-        pParams->nBitrate = value;
+        pParams->nBitrate = 0;
+        pParams->qvbrLevel = value;
         return 0;
     }
     if (IS_OPTION("qvbr-quality")) {

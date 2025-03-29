@@ -126,6 +126,7 @@
   - [--audio-copy \[\<int/string\>;\[,\<int/string\>\]...\]](#--audio-copy-intstringintstring)
   - [--audio-codec \[\[\<int/string\>?\]\<string\>\[:\<string\>=\<string\>\[,\<string\>=\<string\>\]...\]...\]](#--audio-codec-intstringstringstringstringstringstring)
   - [--audio-bitrate \[\<int/string\>?\]\<int\>](#--audio-bitrate-intstringint)
+  - [--audio-quality \[\<int/string\>?\]\<int\>](#--audio-quality-intstringint)
   - [--audio-profile \[\<int/string\>?\]\<string\>](#--audio-profile-intstringstring)
   - [--audio-stream \[\<int/string\>?\]{\<string1\>}\[:\<string2\>\]](#--audio-stream-intstringstring1string2)
   - [--audio-samplerate \[\<int/string\>?\]\<int\>](#--audio-samplerate-intstringint)
@@ -155,10 +156,13 @@
   - [-m, --mux-option \<string1\>:\<string2\>](#-m---mux-option-string1string2)
   - [--metadata \<string\> or \<string\>=\<string\>](#--metadata-string-or-stringstring)
   - [--avsync \<string\>](#--avsync-string)
+  - [--timestamp-passthrough](#--timestamp-passthrough)
   - [--timecode \[\<string\>\]](#--timecode-string)
   - [--tcfile-in \<string\>](#--tcfile-in-string)
   - [--timebase \<int\>/\<int\>](#--timebase-intint)
   - [--input-hevc-bsf \<string\>](#--input-hevc-bsf-string)
+  - [--input-pixel-format \<string\>](#--input-pixel-format-string)
+  - [--offset-video-dts-advance](#--offset-video-dts-advance)
   - [--allow-other-negative-pts](#--allow-other-negative-pts)
 - [Vpp Options](#vpp-options)
   - [Vpp Filtering order](#vpp-filtering-order)
@@ -200,6 +204,7 @@
   - [--vpp-overlay \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-overlay-param1value1param2value2)
   - [--vpp-perf-monitor](#--vpp-perf-monitor)
 - [Other Options](#other-options)
+  - [--parallel \[\<int\>\] or \[\<string\>\]](#--parallel-int-or-string)
   - [--output-buf \<int\>](#--output-buf-int)
   - [--output-thread \<int\>](#--output-thread-int)
   - [--log \<string\>](#--log-string)
@@ -508,7 +513,7 @@ Encode qulaity preset.
 - balanced
 - fast
 - slow
-- slower (for AV1 only)
+- slower
 
 ### --output-depth &lt;int&gt;
 Set output bit depth.
@@ -969,6 +974,11 @@ Example 1: --audio-bitrate 192 (set bitrate of audio track to 192 kbps)
 Example 2: --audio-bitrate 2?256 (set bitrate of 2nd audio track to to 256 kbps)
 ```
 
+### --audio-quality [&lt;int/string&gt;?]&lt;int&gt;
+Specify the quality when encoding audio. The value depends on the codec used.
+
+You can select audio track (1, 2, ...) to encode with [&lt;int&gt;], or select audio track to encode by language with [&lt;string&gt;].
+
 ### --audio-profile [&lt;int/string&gt;?]&lt;string&gt;
 Specify audio codec profile when encoding audio.You can select audio track (1, 2, ...) to encode with [&lt;int&gt;], or select audio track to encode by language with [&lt;string&gt;].
 
@@ -1425,6 +1435,10 @@ Set global metadata for output file.
   - vfr  
     Honor source timestamp and enable vfr output. Only available for avsw/avhw reader, and could not be used with --trim.
     
+### --timestamp-passthrough  
+
+Passthrough original timestamp. Implies ```--avsync vfr```.
+    
 ### --timecode [&lt;string&gt;]  
   Write timecode file to the specified path. If the path is not set, it will be written to "&lt;output file path&gt;.timecode.txt".
 
@@ -1443,6 +1457,12 @@ switch hevc bitstream filter used for hw decoder input. (for debug purpose)
 
   - libavcodec  
     use hevc_mp4toannexb bitstream filter.
+
+### --input-pixel-format &lt;string&gt;
+Set "pixel_format" for input avdevice. (not intended on other situations)
+
+### --offset-video-dts-advance  
+Offset timestamp to cancel bframe delay.
 
 ### --allow-other-negative-pts  
 Allow negative timestamps for audio, subtitles. Intended for debug purpose only.
@@ -2700,6 +2720,34 @@ Print processing time for each filter enabled. This is meant for profiling purpo
 overall performance will decrease as the application waits each filter to finish when checking processing time of them. 
 
 ## Other Options
+
+### --parallel [&lt;int&gt;] or [&lt;string&gt;]
+Enables parallel encoding by file splitting. Divides the input file into multiple chunks and encodes them in parallel using separate threads to accelerate processing. Available on Windows system only.
+
+- **Restrictions**
+  Parallel encoding will be automatically disabled in the following cases:
+  - Input is from pipe
+  - Input is not seekable
+  - Frame timestamps are unstable
+  - No encoding is performed (-c raw)
+  - --dynamic-rc is enabled
+  - --trim option is enabled
+  - --timecode option is specified
+  - --tcfile-in option is specified
+  - --keyfile option is specified
+  - --key-on-chapter option is enabled
+  - ssim/psnr/vmaf is enabled
+  - --vpp-subburn (subtitle burn-in) is specified
+  - --vpp-fruc (frame interpolation) is enabled
+
+- **Examples**
+  ```
+  Example: Auto-determine number of parallel processes
+  --parallel auto
+
+  Example: Run with 3 parallel threads
+  --parallel 3
+  ```
 
 ### --output-buf &lt;int&gt;
 Specify the output buffer size in MB. The default is 8 and the maximum value is 128.

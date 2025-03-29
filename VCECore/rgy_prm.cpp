@@ -2274,6 +2274,7 @@ RGYParamCommon::RGYParamCommon() :
     videoCodecTag(),
     videoMetadata(),
     formatMetadata(),
+    seekRatio(0.0f),
     seekSec(0.0f),               //指定された秒数分先頭を飛ばす
     seekToSec(0.0f),
     nSubtitleSelectCount(0),
@@ -2291,6 +2292,7 @@ RGYParamCommon::RGYParamCommon() :
     inputRetry(0),
     demuxAnalyzeSec(-1),
     demuxProbesize(-1),
+    inputPixFmtStr(),
     AVMuxTarget(RGY_MUX_NONE),                       //RGY_MUX_xxx
     videoTrack(0),
     videoStreamId(0),
@@ -2302,6 +2304,7 @@ RGYParamCommon::RGYParamCommon() :
     audioIgnoreDecodeError(DEFAULT_IGNORE_DECODE_ERROR),
     videoIgnoreTimestampError(DEFAULT_VIDEO_IGNORE_TIMESTAMP_ERROR),
     muxOpt(),
+    offsetVideoDtsAdvance(false),
     allowOtherNegativePts(false),
     disableMp4Opt(false),
     debugDirectAV1Out(false),
@@ -2334,6 +2337,24 @@ bool RGYParamAvoidIdleClock::operator!=(const RGYParamAvoidIdleClock &x) const {
     return !(*this == x);
 }
 
+RGYParamParallelEnc::RGYParamParallelEnc() :
+    parallelCount(0),
+    parallelId(-1),
+    chunks(0),
+    cacheMode(RGYParamParallelEncCache::Mem),
+    sendData(nullptr) {
+
+};
+bool RGYParamParallelEnc::operator==(const RGYParamParallelEnc &x) const {
+    return parallelCount == x.parallelCount
+        && parallelId == x.parallelId
+        && chunks == x.chunks
+        && cacheMode == x.cacheMode;
+}
+bool RGYParamParallelEnc::operator!=(const RGYParamParallelEnc &x) const {
+    return !(*this == x);
+}
+
 RGYParamCommon::~RGYParamCommon() {};
 
 RGYParamControl::RGYParamControl() :
@@ -2362,11 +2383,12 @@ RGYParamControl::RGYParamControl() :
     avsdll(),
     vsdir(),
     enableOpenCL(true),
-    enableVulkan(true),
+    enableVulkan(RGYParamInitVulkan::TargetVendor),
     avoidIdleClock(),
     processMonitorDevUsage(false),
     processMonitorDevUsageReset(false),
-    outputBufSizeMB(RGY_OUTPUT_BUF_MB_DEFAULT) {
+    outputBufSizeMB(RGY_OUTPUT_BUF_MB_DEFAULT),
+    parallelEnc() {
 
 }
 RGYParamControl::~RGYParamControl() {};

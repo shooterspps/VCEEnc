@@ -222,6 +222,7 @@
   - [--avsdll \<string\>](#--avsdll-string)
   - [--vsdir \<string\>](#--vsdir-string)
   - [--process-codepage \<string\> \[Windows OS only\]](#--process-codepage-string-windows-os-only)
+  - [--task-perf-monitor](#--task-perf-monitor)
   - [--perf-monitor \[\<string\>\[,\<string\>\]...\]](#--perf-monitor-stringstring)
   - [--perf-monitor-interval \<int\>](#--perf-monitor-interval-int)
 
@@ -1721,6 +1722,9 @@ Performs tone mapping using [libplacebo](https://code.videolan.org/videolan/libp
   - contrast_smoothness=&lt;float&gt;  
     Contrast recovery lowpass kernel size. Default: 3.5
 
+  - inverse_tone_mapping=&lt;bool&gt;  
+    Inverse tone mapping. Default: false
+
   - visualize_lut=&lt;bool&gt;  
     Visualize tone mapping curve/LUT. Default: false
 
@@ -2788,6 +2792,8 @@ Select the level of log output.
   - core ... Application core logs, including core_progress and core_result
   - core_progress ... Progress indicator
   - core_result ... Encode result
+  - parallel ... Parallel
+  - gpu_select ... GPU auto select
   - decoder ... decoder logs
   - input ... File input logs
   - output ... File output logs
@@ -2815,6 +2821,12 @@ additional options for log output.
 - **parameters**
   - addtime (default=off)  
     Add time of to each line of the log.
+
+  - addlevel (default=off)  
+    Show loglevel to each line of the log.
+
+  - color (default=on)
+    Enable/disable log color.
 
 ### --log-framelist [&lt;string&gt;]
 FOR DEBUG ONLY! Output debug log for avsw/avhw reader.
@@ -2969,6 +2981,10 @@ Specifies vapoursynth portable directory to use. Supported on Windows only.
     When this option is set, a copy of the exe file will be created in the same directory of the original exe file,
     and the manifest file of the copy will be modified using UpdateResourceW API to switch back code page
     to the default of the OS, and then the copied exe will be run, allowing us to handle the AviSynth scripts using legacy code page.
+
+### --task-perf-monitor
+
+Output rough time consumed for each main thread tasks, including wait time.
 
 ### --perf-monitor [&lt;string&gt;[,&lt;string&gt;]...]
 Outputs performance information. You can select the information name you want to output as a parameter from the following table. The default is all (all information).

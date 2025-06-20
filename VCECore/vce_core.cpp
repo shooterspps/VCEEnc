@@ -119,6 +119,7 @@ VCECore::VCECore() :
     m_pPerfMonitor(),
     m_pipelineDepth(2),
     m_nProcSpeedLimit(0),
+    m_taskPerfMonitor(false),
     m_nAVSyncMode(RGY_AVSYNC_AUTO),
     m_timestampPassThrough(false),
     m_inputFps(),
@@ -284,7 +285,7 @@ RGY_ERR VCECore::initChapters(VCEParam *prm) {
 }
 
 RGY_ERR VCECore::initLog(VCEParam *prm) {
-    m_pLog.reset(new RGYLog(prm->ctrl.logfile.c_str(), prm->ctrl.loglevel, prm->ctrl.logAddTime));
+    m_pLog.reset(new RGYLog(prm->ctrl.logfile.c_str(), prm->ctrl.loglevel, prm->ctrl.logOpt.addTime, prm->ctrl.logOpt.addLogLevel, prm->ctrl.logOpt.disableColor));
     if (prm->ctrl.parallelEnc.isChild() && prm->ctrl.parallelEnc.sendData) {
         m_pLog->setLock(prm->ctrl.parallelEnc.sendData->logMutex);
     }
@@ -400,7 +401,9 @@ RGY_ERR VCECore::InitParallelEncode(VCEParam *inputParam, const int maxEncoders)
         }
     }
     m_parallelEnc = std::make_unique<RGYParallelEnc>(m_pLog);
-    if ((sts = m_parallelEnc->parallelRun(inputParam, m_pFileReader.get(), m_outputTimebase, m_pStatus.get())) != RGY_ERR_NONE) {
+    if ((sts = m_parallelEnc->parallelRun(inputParam, m_pFileReader.get(), m_outputTimebase, inputParam->ctrl.parallelEnc.parallelCount > maxEncoders, m_pStatus.get(),
+        // 子スレッドの場合はパフォーマンスカウンタは親と共有する
+        inputParam->ctrl.parallelEnc.isParent() ? m_pPerfMonitor.get() : nullptr)) != RGY_ERR_NONE) {
         if (inputParam->ctrl.parallelEnc.isChild()) {
             return sts; // 子スレッド側でエラーが起こった場合はエラー
         }
@@ -419,6 +422,9 @@ RGY_ERR VCECore::InitParallelEncode(VCEParam *inputParam, const int maxEncoders)
             }
         }
         return RGY_ERR_NONE; // 親の場合は正常終了(並列動作を無効化して継続)を返す
+    }
+    if (inputParam->ctrl.parallelEnc.isChild()) {
+        m_pLog->write(RGY_LOG_DEBUG, RGY_LOGT_CORE_GPU_SELECT, _T("Parallel Enc %d: Selected GPU #%d (%s)\n"), inputParam->ctrl.parallelEnc.parallelId, m_dev->id(), m_dev->name().c_str());
     }
     return RGY_ERR_NONE;
 }
@@ -806,7 +812,8 @@ RGY_ERR VCECore::initDecoder(VCEParam *prm) {
     //AMF_VIDEO_DECODER_SURFACE_COPYを使用すると、pre-analysis使用時などに発生するSubmitInput時のAMF_DECODER_NO_FREE_SURFACESを回避できる
     //しかし、メモリ確保エラーが発生することがある(AMF_DIRECTX_FAIL)
     //そこで、AMF_VIDEO_DECODER_SURFACE_COPYは使用せず、QueryOutput後、明示的にsurface->Duplicateを行って同様の挙動を再現する
-    //m_pDecoder->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
+    //AV1デコードでは、これを有効にしないとAMF_DECODER_NO_FREE_SURFACESで止まってしまうことがわかったので、再度有効にする
+    m_pDecoder->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
 
     m_pDecoder->SetProperty(AMF_VIDEO_DECODER_ENABLE_SMART_ACCESS_VIDEO, prm->smartAccessVideo);
 
@@ -3011,19 +3018,20 @@ RGY_ERR VCECore::gpuAutoSelect(std::vector<std::unique_ptr<VCEDevice>> &gpuList,
             }
         }
     }
+    const tstring PEPrefix = (prm->ctrl.parallelEnc.isChild()) ? strsprintf(_T("Parallel Enc %d: "), prm->ctrl.parallelEnc.parallelId) : _T("");
 #if ENABLE_PERF_COUNTER
     bool counterIsIntialized = m_pPerfMonitor->isPerfCounterInitialized();
     for (int i = 0; i < 4 && !counterIsIntialized; i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         counterIsIntialized = m_pPerfMonitor->isPerfCounterInitialized();
     }
-    if (!counterIsIntialized) {
-        return RGY_ERR_NONE;
+    std::vector<CounterEntry> entries;
+    if (counterIsIntialized) {
+        while (!m_pPerfMonitor->isPerfCounterRefreshed()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        entries = m_pPerfMonitor->GetPerfCountersSystem();
     }
-    while (!m_pPerfMonitor->isPerfCounterRefreshed()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    auto entries = m_pPerfMonitor->GetPerfCountersSystem();
 #endif //#if ENABLE_PERF_COUNTER
 
     std::map<int, double> gpuscore;
@@ -3051,7 +3059,7 @@ RGY_ERR VCECore::gpuAutoSelect(std::vector<std::unique_ptr<VCEDevice>> &gpuList,
         double cl_score = gpu->cl() != nullptr ? 0.0 : -100.0;
 
         gpuscore[gpu->id()] = usage_score + cc_score + ve_score + gpu_score + core_score + cl_score;
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s) score: %.1f: Use %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->id(), gpu->name().c_str(),
+        m_pLog->write(RGY_LOG_DEBUG, RGY_LOGT_CORE_GPU_SELECT, _T("%sGPU #%d (%s) score: %.1f: Use %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), PEPrefix.c_str(), gpu->id(), gpu->name().c_str(),
             gpuscore[gpu->id()], usage_score, ve_score, gpu_score, cc_score, core_score, cl_score);
     }
     std::sort(gpuList.begin(), gpuList.end(), [&](const std::unique_ptr<VCEDevice> &a, const std::unique_ptr<VCEDevice> &b) {
@@ -3063,7 +3071,7 @@ RGY_ERR VCECore::gpuAutoSelect(std::vector<std::unique_ptr<VCEDevice>> &gpuList,
 
     PrintMes(RGY_LOG_DEBUG, _T("GPU Priority\n"));
     for (const auto &gpu : gpuList) {
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s): score %.1f\n"), gpu->id(), gpu->name().c_str(), gpuscore[gpu->id()]);
+        PrintMes(RGY_LOG_DEBUG, _T("%sGPU #%d (%s): score %.1f\n"), PEPrefix.c_str(), gpu->id(), gpu->name().c_str(), gpuscore[gpu->id()]);
     }
     return RGY_ERR_NONE;
 }
@@ -3370,7 +3378,12 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     // そのため、AMF関係の初期化前にperf counterを初期化する
     m_pPerfMonitor = std::make_unique<CPerfMonitor>();
 #if ENABLE_PERF_COUNTER
-    m_pPerfMonitor->runCounterThread();
+    if (prm->ctrl.parallelEnc.isChild()) {
+        // 子スレッドの場合はパフォーマンスカウンタは親と共有するので初期化不要
+        m_pPerfMonitor->setCounter(prm->ctrl.parallelEnc.sendData->perfCounter);
+    } else {
+        m_pPerfMonitor->runCounterThread();
+    }
 #endif //#if ENABLE_PERF_COUNTER
 
     ret = initAMFFactory();
@@ -3406,7 +3419,7 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     if (deviceInfoCache
         && (deviceInfoCache->getDeviceIds().size() == 0
             || (prm->deviceID >= 0 && deviceInfoCache->getDeviceIds().size() <= prm->deviceID))) {
-        devList = createDeviceList(prm->interopD3d9, prm->interopD3d11, prm->ctrl.enableVulkan, prm->ctrl.enableOpenCL, prm->vpp.checkPerformance, prm->enableAV1HWDec);
+        devList = createDeviceList(prm->interopD3d9, prm->interopD3d11, prm->ctrl.enableVulkan, prm->ctrl.enableOpenCL, prm->vpp.checkPerformance, prm->enableAV1HWDec, prm->ctrl.parallelEnc.isParent() ? 1 : prm->ctrl.openclBuildThreads);
         if (devList.size() == 0) {
             PrintMes(RGY_LOG_ERROR, _T("Could not find device to run VCE."));
             return ret;
@@ -3426,7 +3439,7 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     });
 
     if (devList.size() == 0) {
-        devList = createDeviceList(prm->interopD3d9, prm->interopD3d11, prm->ctrl.enableVulkan, prm->ctrl.enableOpenCL, prm->vpp.checkPerformance, prm->enableAV1HWDec);
+        devList = createDeviceList(prm->interopD3d9, prm->interopD3d11, prm->ctrl.enableVulkan, prm->ctrl.enableOpenCL, prm->vpp.checkPerformance, prm->enableAV1HWDec, prm->ctrl.parallelEnc.isParent() ? 1 : prm->ctrl.openclBuildThreads);
         if (devList.size() == 0) {
             PrintMes(RGY_LOG_ERROR, _T("Could not find device to run VCE."));
             return ret;
@@ -3484,7 +3497,8 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     }
 
     // 並列動作の子は読み込みが終了したらすぐに並列動作を呼び出し
-    if (prm->ctrl.parallelEnc.isChild()) {
+    // ただし、親-子間のデータやり取りを少し遅らせる場合(delayChildSync)は親と同じタイミングで処理する
+    if (prm->ctrl.parallelEnc.isChild() && !prm->ctrl.parallelEnc.delayChildSync) {
         ret = InitParallelEncode(prm, (int)m_devNames.size());
         if (ret != RGY_ERR_NONE) return ret;
     }
@@ -3514,7 +3528,7 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     }
 
     // 親はエンコード設定が完了してから並列動作を呼び出し
-    if (prm->ctrl.parallelEnc.isParent()) {
+    if (prm->ctrl.parallelEnc.isParent() || (prm->ctrl.parallelEnc.isChild() && prm->ctrl.parallelEnc.delayChildSync)) {
         ret = InitParallelEncode(prm, (int)m_devNames.size());
         if (ret != RGY_ERR_NONE) return ret;
     }
@@ -3524,6 +3538,9 @@ RGY_ERR VCECore::init(VCEParam *prm) {
     if (RGY_ERR_NONE != (ret = initOutput(prm))) {
         return ret;
     }
+    
+    m_nProcSpeedLimit = prm->ctrl.procSpeedLimit;
+    m_taskPerfMonitor = prm->ctrl.taskPerfMonitor;
 
     if (RGY_ERR_NONE != (ret = initSSIMCalc(prm))) {
         return ret;
@@ -3624,6 +3641,18 @@ RGY_ERR VCECore::run2() {
         PrintMes(RGY_LOG_DEBUG, _T("Failed to create pipeline: size = 0.\n"));
         return RGY_ERR_INVALID_OPERATION;
     }
+    for (auto& task : m_pipelineTasks) {
+        if (m_taskPerfMonitor) {
+            task->setStopWatch();
+        }
+    }
+    std::unique_ptr<PipelineTaskStopWatch> stopwatchOutput;
+    if (m_taskPerfMonitor) {
+        stopwatchOutput = std::make_unique<PipelineTaskStopWatch>(
+            std::vector<tstring>{ _T("") },
+            std::vector<tstring>{_T("")}
+        );
+    }
 
 #if defined(_WIN32) || defined(_WIN64)
     TCHAR handleEvent[256];
@@ -3700,10 +3729,12 @@ RGY_ERR VCECore::run2() {
                             });
                     }
                 } else { // pipelineの最終的なデータを出力
+                    if (stopwatchOutput) stopwatchOutput->set(0);
                     if ((err = d.data->write(m_pFileWriter.get(), (m_dev->cl()) ? &m_dev->cl()->queue() : nullptr, m_videoQualityMetric.get())) != RGY_ERR_NONE) {
                         PrintMes(RGY_LOG_ERROR, _T("failed to write output: %s.\n"), get_err_mes(err));
                         break;
                     }
+                    if (stopwatchOutput) stopwatchOutput->add(0, 0);
                 }
             }
             if (dataqueue.empty()) {
@@ -3757,10 +3788,12 @@ RGY_ERR VCECore::run2() {
                         });
                     if (err == RGY_ERR_MORE_DATA) err = RGY_ERR_NONE; //VPPなどでsendFrameがRGY_ERR_MORE_DATAだったが、フレームが出てくる場合がある
                 } else { // pipelineの最終的なデータを出力
+                    if (stopwatchOutput) stopwatchOutput->set(0);
                     if ((err = d.data->write(m_pFileWriter.get(), (m_dev->cl()) ? &m_dev->cl()->queue() : nullptr, m_videoQualityMetric.get())) != RGY_ERR_NONE) {
                         PrintMes(RGY_LOG_ERROR, _T("failed to write output: %s.\n"), get_err_mes(err));
                         break;
                     }
+                    if (stopwatchOutput) stopwatchOutput->add(0, 0);
                 }
             }
             if (dataqueue.empty()) {
@@ -3819,6 +3852,31 @@ RGY_ERR VCECore::run2() {
         m_pDecoder->Terminate();
         m_pDecoder = nullptr;
         PrintMes(RGY_LOG_DEBUG, _T("Closed Decoder.\n"));
+    }
+    // taskの集計結果を表示
+    if (m_taskPerfMonitor) {
+        PrintMes(RGY_LOG_INFO, _T("\nTask Performance\n"));
+        static const TCHAR *TASK_OUTPUT = _T("OUTPUT");
+        const int64_t totalTicks = std::accumulate(m_pipelineTasks.begin(), m_pipelineTasks.end(), 0LL, [](int64_t total, const std::unique_ptr<PipelineTask>& task) {
+            return total + task->getStopWatchTotal();
+        }) + stopwatchOutput->totalTicks();
+        if (totalTicks > 0) {
+            const size_t maxWorkStrLenLen = std::max(std::accumulate(m_pipelineTasks.begin(), m_pipelineTasks.end(), (size_t)0, [](size_t maxStrLength, const std::unique_ptr<PipelineTask>& task) {
+                return std::max(maxStrLength, task->getStopWatchMaxWorkStrLen());
+            }), stopwatchOutput->maxWorkStrLen());
+            const size_t maxTaskStrLen = std::max(std::accumulate(m_pipelineTasks.begin(), m_pipelineTasks.end(), (size_t)0, [](size_t maxStrLength, const std::unique_ptr<PipelineTask>& task) {
+                return std::max(maxStrLength, _tcslen(getPipelineTaskTypeName(task->taskType())));
+            }), _tcslen(TASK_OUTPUT));
+            for (auto& task : m_pipelineTasks) {
+                task->printStopWatch(totalTicks, maxWorkStrLenLen + maxTaskStrLen - _tcslen(getPipelineTaskTypeName(task->taskType())));
+            }
+            const auto strlines = split(stopwatchOutput->print(totalTicks, maxWorkStrLenLen + maxTaskStrLen - _tcslen(TASK_OUTPUT)), _T("\n"));
+            for (auto& str : strlines) {
+                if (str.length() > 0) {
+                    PrintMes(RGY_LOG_INFO, _T("%s: %s\n"), TASK_OUTPUT, str.c_str());
+                }
+            }
+        }
     }
     //この中でフレームの解放がなされる
     PrintMes(RGY_LOG_DEBUG, _T("Clear pipeline tasks and allocated frames...\n"));
@@ -4348,9 +4406,9 @@ RGY_ERR VCEFeatures::init(int deviceId, const RGYParamLogLevel& loglevel) {
     }
 
 #if ENABLE_D3D11
-    auto devList = m_core->createDeviceList(false, true, RGYParamInitVulkan::Disable, true, false, false);
+    auto devList = m_core->createDeviceList(false, true, RGYParamInitVulkan::Disable, true, false, false, 0);
 #else
-    auto devList = m_core->createDeviceList(false, false, RGYParamInitVulkan::TargetVendor, true, false, false);
+    auto devList = m_core->createDeviceList(false, false, RGYParamInitVulkan::TargetVendor, true, false, false, 0);
 #endif
     std::unique_ptr<RGYDeviceUsage> devUsage;
     std::unique_ptr<RGYDeviceUsageLockManager> devUsageLock;

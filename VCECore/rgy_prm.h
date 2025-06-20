@@ -98,6 +98,7 @@ enum class VppType : int {
     MFX_DETAIL_ENHANCE,
     MFX_FPS_CONV,
     MFX_PERC_ENC_PREFILTER,
+    MFX_AI_FRAMEINTERP,
     MFX_COPY,
 #endif //#if ENCODER_QSV
     MFX_MAX,
@@ -266,6 +267,7 @@ static const int   FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_TONE_CONSTANTS = 1;
 static const int   FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_METADATA = 0;
 static const float FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_CONTRAST_RECOVERY = 0.3f;
 static const float FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_CONTRAST_SMOOTHNESS = 3.5f;
+static const bool  FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_INVERSE_TONE_MAPPING = false;
 static const bool  FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_VISUALIZE_LUT = false;
 static const bool  FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_SHOW_CLIPPING = false;
 static const int   FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_USE_DOVI = -1;
@@ -751,6 +753,7 @@ const CX_DESC list_vpp_resize[] = {
     { _T("amf_fsr"),      RGY_VPP_RESIZE_AMF_FSR_10 },
     { _T("amf_fsr_11"),   RGY_VPP_RESIZE_AMF_FSR_11 },
     { _T("amf_point"),    RGY_VPP_RESIZE_AMF_POINT },
+    { _T("amf_max"),      RGY_VPP_RESIZE_AMF_MAX },
 #endif
 #if ENCODER_MPP
     { _T("rga_nearest"),  RGY_VPP_RESIZE_RGA_NEAREST },
@@ -1245,8 +1248,8 @@ const CX_DESC list_vpp_libplacebo_tone_mapping_gamut_mapping[] = {
 
 const CX_DESC list_vpp_libplacebo_tone_mapping_function[] = {
     { _T("clip"),        (int)VppLibplaceboToneMappingFunction::clip },
-    { _T("st2094_40"),   (int)VppLibplaceboToneMappingFunction::st2094_40 },
-    { _T("st2094_10"),   (int)VppLibplaceboToneMappingFunction::st2094_10 },
+    { _T("st2094-40"),   (int)VppLibplaceboToneMappingFunction::st2094_40 },
+    { _T("st2094-10"),   (int)VppLibplaceboToneMappingFunction::st2094_10 },
     { _T("bt2390"),      (int)VppLibplaceboToneMappingFunction::bt2390 },
     { _T("bt2446a"),     (int)VppLibplaceboToneMappingFunction::bt2446a },
     { _T("spline"),      (int)VppLibplaceboToneMappingFunction::spline },
@@ -1458,6 +1461,7 @@ struct VppLibplaceboToneMapping {
     VppLibplaceboToneMappingMetadata metadata;
     float contrast_recovery;
     float contrast_smoothness;
+    bool inverse_tone_mapping;
     bool visualize_lut;
     bool show_clipping;
     int use_dovi;
@@ -2525,6 +2529,7 @@ struct RGYParamParallelEnc {
     int parallelId; // 親=-1, 子=0～
     int chunks; // 分割数
     RGYParamParallelEncCache cacheMode;
+    bool delayChildSync; // 親-子間のデータやり取りを少し遅らせる
     RGYParallelEncSendData *sendData; // 並列処理時に親-子間のデータやり取り用
     RGYParamParallelEnc();
     bool operator==(const RGYParamParallelEnc &x) const;
@@ -2540,12 +2545,22 @@ enum class RGYParamInitVulkan {
     All,
 };
 
+struct RGYParamLogOpt {
+    bool addTime;
+    bool addLogLevel;
+    bool disableColor;
+
+    RGYParamLogOpt();
+    bool operator==(const RGYParamLogOpt &x) const;
+    bool operator!=(const RGYParamLogOpt &x) const;
+};
+
 struct RGYParamControl {
     int threadCsp;
     RGY_SIMD simdCsp;
     tstring logfile;              //ログ出力先
     RGYParamLogLevel loglevel; //ログ出力レベル
-    bool logAddTime;
+    RGYParamLogOpt logOpt;
     RGYDebugLogFile logFramePosList;     //framePosList出力
     RGYDebugLogFile logPacketsList;
     RGYDebugLogFile logMuxVidTs;
@@ -2567,6 +2582,7 @@ struct RGYParamControl {
     tstring vsdir;
     bool enableOpenCL;
     RGYParamInitVulkan enableVulkan;
+    int openclBuildThreads;
     RGYParamAvoidIdleClock avoidIdleClock;
     bool processMonitorDevUsage;
     bool processMonitorDevUsageReset;

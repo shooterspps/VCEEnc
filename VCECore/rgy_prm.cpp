@@ -518,6 +518,7 @@ VppLibplaceboToneMapping::VppLibplaceboToneMapping() :
     metadata((VppLibplaceboToneMappingMetadata)FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_METADATA),
     contrast_recovery(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_CONTRAST_RECOVERY),
     contrast_smoothness(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_CONTRAST_SMOOTHNESS),
+    inverse_tone_mapping(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_INVERSE_TONE_MAPPING),
     visualize_lut(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_VISUALIZE_LUT),
     show_clipping(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_SHOW_CLIPPING),
     use_dovi(FILTER_DEFAULT_LIBPLACEBO_TONEMAPPING_USE_DOVI),
@@ -548,6 +549,7 @@ bool VppLibplaceboToneMapping::operator==(const VppLibplaceboToneMapping &x) con
         && metadata == x.metadata
         && contrast_recovery == x.contrast_recovery
         && contrast_smoothness == x.contrast_smoothness
+        && inverse_tone_mapping == x.inverse_tone_mapping
         && visualize_lut == x.visualize_lut
         && show_clipping == x.show_clipping
         && use_dovi == x.use_dovi
@@ -556,9 +558,11 @@ bool VppLibplaceboToneMapping::operator==(const VppLibplaceboToneMapping &x) con
         && dst_pl_transfer == x.dst_pl_transfer
         && dst_pl_colorprim == x.dst_pl_colorprim;
 }
+
 bool VppLibplaceboToneMapping::operator!=(const VppLibplaceboToneMapping &x) const {
     return !(*this == x);
 }
+
 tstring VppLibplaceboToneMapping::print() const {
     tstring str;
     str += strsprintf(_T("src_csp=%s, "), get_cx_desc(list_vpp_libplacebo_tone_mapping_csp, (int)src_csp));
@@ -579,6 +583,7 @@ tstring VppLibplaceboToneMapping::print() const {
     str += strsprintf(_T("metadata=%s, "), get_cx_desc(list_vpp_libplacebo_tone_mapping_metadata, (int)metadata));
     str += strsprintf(_T("contrast_recovery=%.2f, "), contrast_recovery);
     str += strsprintf(_T("contrast_smoothness=%.2f, "), contrast_smoothness);
+    str += strsprintf(_T("inverse_tone_mapping=%s, "), inverse_tone_mapping ? _T("on") : _T("off"));
     str += strsprintf(_T("visualize_lut=%d, "), visualize_lut);
     str += strsprintf(_T("show_clipping=%d, "), show_clipping);
     str += strsprintf(_T("use_dovi=%s, "), use_dovi < 0 ? _T("auto") : ((use_dovi > 0) ?  _T("on") : _T("off")));
@@ -2342,6 +2347,7 @@ RGYParamParallelEnc::RGYParamParallelEnc() :
     parallelId(-1),
     chunks(0),
     cacheMode(RGYParamParallelEncCache::Mem),
+    delayChildSync(false),
     sendData(nullptr) {
 
 };
@@ -2355,6 +2361,17 @@ bool RGYParamParallelEnc::operator!=(const RGYParamParallelEnc &x) const {
     return !(*this == x);
 }
 
+RGYParamLogOpt::RGYParamLogOpt() : addTime(false), addLogLevel(false), disableColor(false) {}
+
+bool RGYParamLogOpt::operator==(const RGYParamLogOpt &x) const {
+    return addTime == x.addTime
+        && addLogLevel == x.addLogLevel
+        && disableColor == x.disableColor;
+}
+bool RGYParamLogOpt::operator!=(const RGYParamLogOpt &x) const {
+    return !(*this == x);
+}
+
 RGYParamCommon::~RGYParamCommon() {};
 
 RGYParamControl::RGYParamControl() :
@@ -2362,7 +2379,7 @@ RGYParamControl::RGYParamControl() :
     simdCsp(RGY_SIMD::SIMD_ALL),
     logfile(),              //ログ出力先
     loglevel(RGY_LOG_INFO),                 //ログ出力レベル
-    logAddTime(false),
+    logOpt(),
     logFramePosList(),     //framePosList出力
     logPacketsList(),
     logMuxVidTs(),
@@ -2384,6 +2401,7 @@ RGYParamControl::RGYParamControl() :
     vsdir(),
     enableOpenCL(true),
     enableVulkan(RGYParamInitVulkan::TargetVendor),
+    openclBuildThreads(0),
     avoidIdleClock(),
     processMonitorDevUsage(false),
     processMonitorDevUsageReset(false),
@@ -2493,19 +2511,9 @@ bool invalid_with_raw_out(const RGYParamCommon &prm, shared_ptr<RGYLog> log) {
     INVALID_WITH_RAW_OUT(prm.hdr10plusMetadataCopy, "--dhdr10-info copy");
     INVALID_WITH_RAW_OUT(prm.dynamicHdr10plusJson.length() > 0, "--dhdr10-info");
     INVALID_WITH_RAW_OUT(prm.doviRpuFile.length() > 0, "--dolby-vision-rpu");
-    INVALID_WITH_RAW_OUT(prm.nAudioSelectCount > 0, "audio related options");
-    INVALID_WITH_RAW_OUT(prm.audioSource.size() > 0, "--audio-source");
-    INVALID_WITH_RAW_OUT(prm.nSubtitleSelectCount > 0, "subtitle related options");
-    INVALID_WITH_RAW_OUT(prm.subSource.size() > 0, "--sub-source");
-    INVALID_WITH_RAW_OUT(prm.nDataSelectCount > 0, "data related options");
-    INVALID_WITH_RAW_OUT(prm.nAttachmentSelectCount > 0, "--attachment-copy");
     INVALID_WITH_RAW_OUT(prm.chapterFile.length() > 0, "--chapter");
     INVALID_WITH_RAW_OUT(prm.copyChapter, "--chapter-copy");
-    INVALID_WITH_RAW_OUT(prm.formatMetadata.size() > 0, "--metadata");
-    INVALID_WITH_RAW_OUT(prm.videoMetadata.size() > 0, "--video-metadata");
-    INVALID_WITH_RAW_OUT(prm.muxOpt.size() > 0, "-m");
     INVALID_WITH_RAW_OUT(prm.keyFile.length() > 0, "--keyfile");
-    INVALID_WITH_RAW_OUT(prm.timecodeFile.length() > 0, "--timecode");
     INVALID_WITH_RAW_OUT(prm.metric.ssim, "--ssim");
     INVALID_WITH_RAW_OUT(prm.metric.psnr, "--psnr");
     INVALID_WITH_RAW_OUT(prm.metric.vmaf.enable, "--vmaf");

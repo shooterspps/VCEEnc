@@ -102,7 +102,7 @@ public:
     void SetAbortFlagPointer(bool *abortFlag);
 protected:
     virtual RGY_ERR readChapterFile(tstring chapfile);
-
+    std::pair<RGY_ERR, VideoInfo> GetOutputVideoInfo();
     RGY_ERR checkGPUListByEncoder(std::vector<std::unique_ptr<VCEDevice>> &gpuList, const VCEParam *prm, int deviceId);
     RGY_ERR gpuAutoSelect(std::vector<std::unique_ptr<VCEDevice>> &gpuList, const VCEParam *prm, const RGYDeviceUsageLockManager *devUsageLock);
     virtual RGY_CSP GetEncoderCSP(const VCEParam *inputParam) const;
@@ -110,6 +110,8 @@ protected:
     virtual RGY_ERR checkParam(VCEParam *prm);
     virtual RGY_ERR initPerfMonitor(VCEParam *prm);
     virtual RGY_ERR InitParallelEncode(VCEParam *inputParam, const int maxEncoders);
+    virtual RGY_ERR createDecoder(VCEParam *prm, amf::AMFComponentPtr& decoder);
+    virtual RGY_ERR tryDecode(amf::AMFComponentPtr& decoder);
     virtual RGY_ERR initDecoder(VCEParam *prm);
     virtual RGY_ERR initFilters(VCEParam *prm);
     virtual std::vector<VppType> InitFiltersCreateVppList(const VCEParam *inputParam,
@@ -132,6 +134,7 @@ protected:
     virtual RGY_ERR run_output();
 
     RGY_CODEC          m_encCodec;
+    RGY_CSP            m_encCSP;
     bool m_bTimerPeriodTuning;
 #if ENABLE_AVSW_READER
     bool                          m_keyOnChapter;        //チャプター上にキーフレームを配置する

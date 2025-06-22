@@ -93,6 +93,7 @@ static const int VBV_BUFSIZE_MAX_Kbit = 500000;
 
 VCECore::VCECore() :
     m_encCodec(RGY_CODEC_UNKNOWN),
+    m_encCSP(RGY_CSP_NA),
     m_bTimerPeriodTuning(true),
 #if ENABLE_AVSW_READER
     m_keyOnChapter(false),
@@ -446,7 +447,8 @@ int VCECore::GetEncoderBitdepth(const VCEParam *inputParam) const {
     switch (inputParam->codec) {
     case RGY_CODEC_H264: return 8;
     case RGY_CODEC_HEVC:
-    case RGY_CODEC_AV1:  return inputParam->outputDepth;
+    case RGY_CODEC_AV1:
+    case RGY_CODEC_RAW: return inputParam->outputDepth;
     default:
         return 0;
     }
@@ -454,7 +456,7 @@ int VCECore::GetEncoderBitdepth(const VCEParam *inputParam) const {
 
 RGY_ERR VCECore::initInput(VCEParam *inputParam, DeviceCodecCsp& HWDecCodecCsp) {
 #if ENABLE_RAW_READER
-    m_pStatus.reset(new EncodeStatus());
+    m_pStatus = std::make_shared<EncodeStatus>();
 
     int subburnTrackId = 0;
     for (const auto &subburn : inputParam->vpp.subburn) {
@@ -750,17 +752,66 @@ RGY_ERR VCECore::checkParam(VCEParam *prm) {
     return RGY_ERR_NONE;
 }
 
-RGY_ERR VCECore::initOutput(VCEParam *inputParams) {
-    const auto outputVideoInfo = videooutputinfo(
-        inputParams->codec,
-        csp_rgy_to_enc(GetEncoderCSP(inputParams)),
-        m_params,
-        m_sar,
-        m_picStruct,
-        m_encVUI
-    );
+std::pair<RGY_ERR, VideoInfo> VCECore::GetOutputVideoInfo() {
+    if (m_pEncoder) {
+        return { RGY_ERR_NONE, videooutputinfo(
+            m_encCodec,
+            csp_rgy_to_enc(m_encCSP),
+            m_params,
+            m_sar,
+            m_picStruct,
+            m_encVUI
+        )};
+    }
+    if (m_vpFilters.size() > 0) {
+        auto& lastFilter = m_vpFilters.back();
+        RGYFrameInfo frameOut;
+        if (lastFilter.type == VppFilterType::FILTER_AMF) {
+            frameOut = lastFilter.vppamf->GetFilterParam()->frameOut;
+        } else if (lastFilter.type == VppFilterType::FILTER_OPENCL) {
+            frameOut = lastFilter.vppcl.back()->GetFilterParam()->frameOut;
+        } else {
+            PrintMes(RGY_LOG_ERROR, _T("GetOutputVideoInfo: Unknown VPP filter type.\n"));
+            return { RGY_ERR_UNSUPPORTED, VideoInfo() };
+        }
+        VideoInfo info;
+        info.codec = RGY_CODEC_RAW;
+        info.dstWidth = frameOut.width;
+        info.dstHeight = frameOut.height;
+        info.srcWidth = frameOut.width;
+        info.srcHeight = frameOut.height;
+        info.fpsN = m_encFps.n();
+        info.fpsD = m_encFps.d();
+        info.sar[0] = m_sar.n();
+        info.sar[1] = m_sar.d();
+        adjust_sar(&info.sar[0], &info.sar[1], info.dstWidth, info.dstHeight);
+        info.picstruct = frameOut.picstruct;
+        info.csp = frameOut.csp;
+        info.vui = m_encVUI;
+        return { RGY_ERR_NONE, info };
+    }
+    if (m_pFileReader) {
+        auto info = m_pFileReader->GetInputFrameInfo();
+        info.codec = RGY_CODEC_RAW;
+        if (info.dstWidth == 0) info.dstWidth = info.srcWidth;
+        if (info.dstHeight == 0) info.dstHeight = info.srcHeight;
+        return { RGY_ERR_NONE, info };
+    }
+    PrintMes(RGY_LOG_ERROR, _T("GetOutputVideoInfo: No encoder or VPP filter.\n"));
+    return { RGY_ERR_UNSUPPORTED, VideoInfo() };
+}
 
-    auto err = initWriters(m_pFileWriter, m_pFileWriterListAudio, m_pFileReader, m_AudioReaders,
+RGY_ERR VCECore::initOutput(VCEParam *inputParams) {
+    auto [err, outputVideoInfo] = GetOutputVideoInfo();
+    if (err != RGY_ERR_NONE) {
+        PrintMes(RGY_LOG_ERROR, _T("failed to get output video info.\n"));
+        return err;
+    }
+    if (inputParams->codec == RGY_CODEC_RAW) {
+        inputParams->common.AVMuxTarget &= ~RGY_MUX_VIDEO;
+    }
+
+    err = initWriters(m_pFileWriter, m_pFileWriterListAudio, m_pFileReader, m_AudioReaders,
         &inputParams->common, &inputParams->input, &inputParams->ctrl, outputVideoInfo,
         m_trimParam, m_outputTimebase, m_Chapters, m_hdrseiOut.get(), m_hdr10plus.get(), m_dovirpu.get(), m_encTimestamp.get(), false, false, false, 0,
         m_poolPkt.get(), m_poolFrame.get(), m_pStatus, m_pPerfMonitor, m_pLog);
@@ -782,8 +833,8 @@ RGY_ERR VCECore::initOutput(VCEParam *inputParams) {
 
 #pragma warning(push)
 #pragma warning(disable: 4100)
-RGY_ERR VCECore::initDecoder(VCEParam *prm) {
-#if ENABLE_AVSW_READER
+
+RGY_ERR VCECore::createDecoder(VCEParam *prm, amf::AMFComponentPtr& decoder) {
     const auto inputCodec = m_pFileReader->getInputCodec();
     if (inputCodec == RGY_CODEC_UNKNOWN) {
         PrintMes(RGY_LOG_DEBUG, _T("decoder not required.\n"));
@@ -802,7 +853,7 @@ RGY_ERR VCECore::initDecoder(VCEParam *prm) {
         }
     }
     PrintMes(RGY_LOG_DEBUG, _T("decoder: use codec \"%s\".\n"), wstring_to_tstring(codec_uvd_name).c_str());
-    auto res = m_pFactory->CreateComponent(m_dev->context(), codec_uvd_name, &m_pDecoder);
+    auto res = m_pFactory->CreateComponent(m_dev->context(), codec_uvd_name, &decoder);
     if (res != AMF_OK) {
         PrintMes(RGY_LOG_ERROR, _T("Failed to create decoder context: %s\n"), AMFRetString(res));
         return err_to_rgy(res);
@@ -813,13 +864,13 @@ RGY_ERR VCECore::initDecoder(VCEParam *prm) {
     //しかし、メモリ確保エラーが発生することがある(AMF_DIRECTX_FAIL)
     //そこで、AMF_VIDEO_DECODER_SURFACE_COPYは使用せず、QueryOutput後、明示的にsurface->Duplicateを行って同様の挙動を再現する
     //AV1デコードでは、これを有効にしないとAMF_DECODER_NO_FREE_SURFACESで止まってしまうことがわかったので、再度有効にする
-    m_pDecoder->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
+    decoder->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
 
-    m_pDecoder->SetProperty(AMF_VIDEO_DECODER_ENABLE_SMART_ACCESS_VIDEO, prm->smartAccessVideo);
+    decoder->SetProperty(AMF_VIDEO_DECODER_ENABLE_SMART_ACCESS_VIDEO, prm->smartAccessVideo);
 
     //RGY_CODEC_VC1のときはAMF_TS_SORTを選択する必要がある
     const AMF_TIMESTAMP_MODE_ENUM timestamp_mode = (inputCodec == RGY_CODEC_VC1) ? AMF_TS_SORT : AMF_TS_PRESENTATION;
-    if (AMF_OK != (res = m_pDecoder->SetProperty(AMF_TIMESTAMP_MODE, amf_int64(timestamp_mode)))) {
+    if (AMF_OK != (res = decoder->SetProperty(AMF_TIMESTAMP_MODE, amf_int64(timestamp_mode)))) {
         PrintMes(RGY_LOG_ERROR, _T("Failed to set deocder: %s\n"), AMFRetString(res));
         return err_to_rgy(res);
     }
@@ -836,19 +887,138 @@ RGY_ERR VCECore::initDecoder(VCEParam *prm) {
         m_dev->context()->AllocBuffer(amf::AMF_MEMORY_HOST, header.size(), &buffer);
 
         memcpy(buffer->GetNative(), header.data(), header.size());
-        m_pDecoder->SetProperty(AMF_VIDEO_DECODER_EXTRADATA, amf::AMFVariant(buffer));
+        decoder->SetProperty(AMF_VIDEO_DECODER_EXTRADATA, amf::AMFVariant(buffer));
     }
 
     PrintMes(RGY_LOG_DEBUG, _T("initialize %s decoder: %dx%d, %s.\n"),
         CodecToStr(inputCodec).c_str(), prm->input.srcWidth, prm->input.srcHeight,
         wstring_to_tstring(m_pTrace->SurfaceGetFormatName(csp_rgy_to_enc(prm->input.csp))).c_str());
-    if (AMF_OK != (res = m_pDecoder->Init(csp_rgy_to_enc(prm->input.csp), prm->input.srcWidth, prm->input.srcHeight))) {
+    if (AMF_OK != (res = decoder->Init(csp_rgy_to_enc(prm->input.csp), prm->input.srcWidth, prm->input.srcHeight))) {
         PrintMes(RGY_LOG_ERROR, _T("Failed to init %s decoder (%s %dx%d): %s\n"), CodecToStr(inputCodec).c_str(),
             wstring_to_tstring(m_pTrace->SurfaceGetFormatName(csp_rgy_to_enc(prm->input.csp))).c_str(), prm->input.srcWidth, prm->input.srcHeight,
             AMFRetString(res));
         return err_to_rgy(res);
     }
     PrintMes(RGY_LOG_DEBUG, _T("Initialized decoder.\n"));
+    return RGY_ERR_NONE;
+}
+
+RGY_ERR VCECore::tryDecode(amf::AMFComponentPtr& decoder) {
+    auto sts = RGY_ERR_NONE;
+    RGYBitstream bitstream = RGYBitstreamInit();
+    for (int i = 0; i < 1000; i++) {
+        sts = m_pFileReader->GetNextBitstreamNoDelete(&bitstream, i);
+        if (sts != RGY_ERR_NONE && sts != RGY_ERR_MORE_DATA) {
+            return sts;
+        }
+        amf::AMFBufferPtr pictureBuffer;
+        if (sts == RGY_ERR_NONE) {
+            auto ar = m_dev->context()->AllocBuffer(amf::AMF_MEMORY_HOST, bitstream.size(), &pictureBuffer);
+            if (ar != AMF_OK) {
+                return err_to_rgy(ar);
+            }
+            memcpy(pictureBuffer->GetNative(), bitstream.data(), bitstream.size());
+            pictureBuffer->SetDuration(bitstream.duration());
+            pictureBuffer->SetPts(bitstream.pts());
+        }
+        bitstream.setSize(0);
+        bitstream.setOffset(0);
+        if (pictureBuffer || sts == RGY_ERR_MORE_BITSTREAM /*EOFの場合はDrainを送る*/) {
+            auto ar = AMF_OK;
+            do {
+                if (sts == RGY_ERR_MORE_BITSTREAM) {
+                    ar = decoder->Drain();
+                } else {
+                    try {
+                        ar = decoder->SubmitInput(pictureBuffer);
+                    } catch (...) {
+                        //PrintMes(RGY_LOG_ERROR, _T("ERROR: Unexpected error while submitting bitstream to decoder.\n"));
+                        ar = AMF_UNEXPECTED;
+                    }
+                }
+                if (ar == AMF_NEED_MORE_INPUT) {
+                    break;
+                } else if (ar == AMF_RESOLUTION_CHANGED || ar == AMF_RESOLUTION_UPDATED) {
+                    //PrintMes(RGY_LOG_ERROR, _T("ERROR: Resolution changed during decoding.\n"));
+                    break;
+                } else if (ar == AMF_INPUT_FULL || ar == AMF_DECODER_NO_FREE_SURFACES) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    break;
+                } else if (ar == AMF_REPEAT) {
+                    continue; // データはまだ使用されていないので、再度呼び出し
+                } else {
+                    break;
+                }
+            } while (true);
+            if (   ar != AMF_OK
+                && ar != AMF_NEED_MORE_INPUT
+                && ar != AMF_INPUT_FULL
+                && ar != AMF_DECODER_NO_FREE_SURFACES) {
+                //PrintMes(RGY_LOG_ERROR, _T("ERROR: Unexpected error while submitting bitstream to decoder: %s.\n"), get_err_mes(err_to_rgy(ar)));
+                return err_to_rgy(ar);
+            }
+            for (;;) {
+                amf::AMFDataPtr data;
+                try {
+                    ar = decoder->QueryOutput(&data);
+                } catch (...) {
+                    PrintMes(RGY_LOG_ERROR, _T("ERROR: Unexpected error while getting frame from decoder.\n"));
+                    ar = AMF_UNEXPECTED;
+                }
+                if (ar == AMF_EOF) {
+                    break;
+                }
+                if (ar == AMF_REPEAT) {
+                    ar = AMF_OK; //これ重要...ここが欠けると最後の数フレームが欠落する
+                }
+                if (ar == AMF_OK) {
+                    if (data != nullptr) {
+                        return RGY_ERR_NONE;
+                    }
+                    break;
+                }
+                if (ar != AMF_OK) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (ar == AMF_EOF || m_state == RGY_STATE_EOF) {
+                sts = RGY_ERR_MORE_BITSTREAM;
+            } else if (ar != AMF_OK) {
+                sts = err_to_rgy(ar); m_state = RGY_STATE_ERROR;
+                PrintMes(RGY_LOG_ERROR, _T("Failed to load input frame: %s.\n"), get_err_mes(sts));
+                return sts;
+            }
+        }
+    }
+    return sts;
+}
+
+RGY_ERR VCECore::initDecoder(VCEParam *prm) {
+#if ENABLE_AVSW_READER
+    if (m_pFileReader->getInputCodec() != RGY_CODEC_UNKNOWN) {
+        amf::AMFComponentPtr testDecoder;
+        auto err = createDecoder(prm, testDecoder);
+        if (err != RGY_ERR_NONE) {
+            PrintMes(RGY_LOG_ERROR, _T("Failed to create decoder.\n"));
+            return err;
+        }
+        if (testDecoder) {
+            err = tryDecode(testDecoder);
+            if (err != RGY_ERR_NONE) {
+                PrintMes(RGY_LOG_WARN, _T("Failed to try hw decoder, switching to sw decoder.\n"));
+                auto avswreader = std::dynamic_pointer_cast<RGYInputAvcodec>(m_pFileReader);
+                if (avswreader == nullptr) {
+                    PrintMes(RGY_LOG_ERROR, _T("Failed to switch to sw decoder, unknown reader type.\n"));
+                    return err;
+                }
+                return avswreader->initSWVideoDecoder(_T(""));
+            }
+        }
+    }
+    auto err = createDecoder(prm, m_pDecoder);
+    if (err != RGY_ERR_NONE) {
+        PrintMes(RGY_LOG_ERROR, _T("Failed to create decoder.\n"));
+        return err;
+    }
     return RGY_ERR_NONE;
 #else
     return RGY_ERR_NONE;
@@ -2071,6 +2241,9 @@ RGY_ERR VCECore::AddFilterOpenCL(std::vector<std::unique_ptr<RGYFilter>>&clfilte
 }
 
 RGY_ERR VCECore::initEncoder(VCEParam *prm) {
+    if (prm->codec == RGY_CODEC_RAW) {
+        return RGY_ERR_NONE;
+    }
     AMF_RESULT res = AMF_OK;
 
     m_encWidth  = (m_pLastFilterParam) ? m_pLastFilterParam->frameOut.width  : prm->input.srcWidth  - prm->input.crop.e.left - prm->input.crop.e.right;
@@ -2093,12 +2266,12 @@ RGY_ERR VCECore::initEncoder(VCEParam *prm) {
 
     m_encCodec = prm->codec;
 
-    const auto encCsp = GetEncoderCSP(prm);
-    if (encCsp == RGY_CSP_NA) {
+    m_encCSP = GetEncoderCSP(prm);
+    if (m_encCSP == RGY_CSP_NA) {
         PrintMes(RGY_LOG_ERROR, _T("Unknown Error in GetEncoderCSP().\n"));
         return RGY_ERR_UNSUPPORTED;
     }
-    const amf::AMF_SURFACE_FORMAT formatIn = csp_rgy_to_enc(encCsp);
+    const amf::AMF_SURFACE_FORMAT formatIn = csp_rgy_to_enc(m_encCSP);
     if (AMF_OK != (res = m_pFactory->CreateComponent(m_dev->context(), codec_rgy_to_enc(prm->codec), &m_pEncoder))) {
         PrintMes(RGY_LOG_ERROR, _T("Failed to AMFCreateComponent: %s.\n"), AMFRetString(res));
         return err_to_rgy(res);
@@ -2738,167 +2911,169 @@ RGY_ERR VCECore::checkGPUListByEncoder(std::vector<std::unique_ptr<VCEDevice>> &
     //エンコーダの対応をチェック
     tstring message; //GPUチェックのメッセージ
     for (auto gpu = gpuList.begin(); gpu != gpuList.end(); ) {
-        PrintMes(RGY_LOG_DEBUG, _T("Checking GPU #%d (%s) for codec %s.\n"),
-            (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
-        //コーデックのチェック
-        amf::AMFCapsPtr encoderCaps = (*gpu)->getEncCaps(prm->codec);
-        if (encoderCaps == nullptr) {
-            message += strsprintf(_T("GPU #%d (%s) does not support %s encoding.\n"),
+        if (prm->codec != RGY_CODEC_RAW) {
+            PrintMes(RGY_LOG_DEBUG, _T("Checking GPU #%d (%s) for codec %s.\n"),
                 (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
-            gpu = gpuList.erase(gpu);
-            continue;
-        }
-
-        amf::AMF_ACCELERATION_TYPE accelType = encoderCaps->GetAccelerationType();
-        PrintMes(RGY_LOG_DEBUG, _T("  acceleration: %s.\n"), AccelTypeToString(accelType).c_str());
-        if (accelType != amf::AMF_ACCEL_GPU && accelType != amf::AMF_ACCEL_HARDWARE) {
-            message += strsprintf(_T("GPU #%d (%s) does not HW Acceleration of %s encoding.\n"),
-                (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
-            gpu = gpuList.erase(gpu);
-            continue;
-        }
-
-        //HEVCについてはmain10が無効だと返す場合があるので、チェックしないようにする
-        if (prm->codec != RGY_CODEC_HEVC || !IGNORE_HEVC_PROFILE_CAP) {
-            int maxProfile = 0;
-            encoderCaps->GetProperty(AMF_PARAM_CAP_MAX_PROFILE(prm->codec), &maxProfile);
-            PrintMes(RGY_LOG_DEBUG, _T("  Max Profile: %s.\n"), get_cx_desc(get_profile_list(prm->codec), maxProfile));
-            if (prm->codecParam[prm->codec].nProfile > maxProfile) {
-                message += strsprintf(_T("GPU #%d (%s) does not support %s %s profile (max supported: %s).\n"),
-                                      (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                                      get_cx_desc(get_profile_list(prm->codec), prm->codecParam[prm->codec].nProfile),
-                                      get_cx_desc(get_profile_list(prm->codec), maxProfile));
-                gpu = gpuList.erase(gpu);
-                continue;
-            }
-        }
-
-        int maxLevel = 0;
-        encoderCaps->GetProperty(AMF_PARAM_CAP_MAX_LEVEL(prm->codec), &maxLevel);
-        PrintMes(RGY_LOG_DEBUG, _T("  Max Level: %s.\n"), get_cx_desc(get_level_list(prm->codec), maxLevel));
-        if (prm->codecParam[prm->codec].nLevel > maxLevel) {
-            message += strsprintf(_T("GPU #%d (%s) does not support %s Level %s (max supported: %s).\n"),
-                (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                get_cx_desc(get_level_list(prm->codec), prm->codecParam[prm->codec].nLevel),
-                get_cx_desc(get_level_list(prm->codec), maxLevel));
-            gpu = gpuList.erase(gpu);
-            continue;
-        }
-
-        if (false) { // 入力フォーマットについてはチェックしないようにする
-            amf::AMFIOCapsPtr inputCaps;
-            if (encoderCaps->GetInputCaps(&inputCaps) == AMF_OK) {
-                bool formatSupported = false;
-                int numOfFormats = inputCaps->GetNumOfFormats();
-                for (int i = 0; i < numOfFormats; i++) {
-                    amf::AMF_SURFACE_FORMAT format;
-                    amf_bool native = false;
-                    if (inputCaps->GetFormatAt(i, &format, &native) == AMF_OK && format == formatIn) {
-                        formatSupported = true;
-                        break;
-                    }
-                }
-                if (!formatSupported) {
-                    message += strsprintf(_T("GPU #%d (%s) [%s] does not support input format %s.\n"),
-                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                        m_pTrace->SurfaceGetFormatName(formatIn));
-                    gpu = gpuList.erase(gpu);
-                    continue;
-                }
-            }
-        }
-
-        amf::AMFIOCapsPtr outputCaps;
-        if (encoderCaps->GetOutputCaps(&outputCaps) == AMF_OK) {
-            if (false) {
-                int minWidth, maxWidth;
-                outputCaps->GetWidthRange(&minWidth, &maxWidth);
-                if (m_encWidth < minWidth || maxWidth < m_encWidth) {
-                    message += strsprintf(_T("GPU #%d (%s) [%s] does not support width %d (supported %d - %d).\n"),
-                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                        m_encWidth, minWidth, maxWidth);
-                    gpu = gpuList.erase(gpu);
-                    continue;
-                }
-
-                int minHeight, maxHeight;
-                outputCaps->GetHeightRange(&minHeight, &maxHeight);
-                if (m_encHeight < minHeight || maxHeight < m_encHeight) {
-                    message += strsprintf(_T("GPU #%d (%s) [%s] does not support height %d (supported %d - %d).\n"),
-                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                        m_encHeight, minHeight, maxHeight);
-                    gpu = gpuList.erase(gpu);
-                    continue;
-                }
-            }
-            if (false) { // 出力フォーマットについてはチェックしないようにする
-                bool formatSupported = false;
-                int numOfFormats = outputCaps->GetNumOfFormats();
-                for (int i = 0; i < numOfFormats; i++) {
-                    amf::AMF_SURFACE_FORMAT format;
-                    amf_bool native = false;
-                    if (outputCaps->GetFormatAt(i, &format, &native) == AMF_OK && format == formatOut) {
-                        formatSupported = true;
-                        break;
-                    }
-                }
-                if (!formatSupported) {
-                    message += strsprintf(_T("GPU #%d (%s) [%s] does not support ouput format %s.\n"),
-                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
-                        m_pTrace->SurfaceGetFormatName(formatOut));
-                    gpu = gpuList.erase(gpu);
-                    continue;
-                }
-            }
-            //インタレ保持のチェック
-            const bool interlacedEncoding =
-                (prm->input.picstruct & RGY_PICSTRUCT_INTERLACED)
-                && !prm->vpp.afs.enable
-                && !prm->vpp.nnedi.enable
-                && !prm->vpp.yadif.enable
-                && !prm->vpp.decomb.enable;
-            if (interlacedEncoding
-                && !outputCaps->IsInterlacedSupported()) {
-                message += strsprintf(_T("GPU #%d (%s) does not support %s interlaced encoding.\n"),
+            //コーデックのチェック
+            amf::AMFCapsPtr encoderCaps = (*gpu)->getEncCaps(prm->codec);
+            if (encoderCaps == nullptr) {
+                message += strsprintf(_T("GPU #%d (%s) does not support %s encoding.\n"),
                     (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
                 gpu = gpuList.erase(gpu);
                 continue;
             }
-        }
-        if (encBitdepth > 8) {
-            if (encBitdepth == 10) {
-                bool Support10bitDepth = false;
-                if (encoderCaps->GetProperty(VCEDevice::CAP_10BITDEPTH, &Support10bitDepth) != AMF_OK) {
-                    Support10bitDepth = false;
-                }
-                if (!Support10bitDepth) {
-                    message += strsprintf(_T("GPU #%d (%s) does not support 10bit depth %s encoding.\n"), (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
-                    gpu = gpuList.erase(gpu);
-                    continue;
-                }
-            } else {
-                PrintMes(RGY_LOG_ERROR, _T("Unsupported output bit depth: %d.\n"), encBitdepth);
-                return RGY_ERR_UNSUPPORTED;
-            }
-        }
 
-        { //レート制御のチェック
-            amf::AMFComponentPtr encoder;
-            if (m_pFactory->CreateComponent((*gpu)->context(), codec_rgy_to_enc(prm->codec), &encoder) == AMF_OK) {
-                const amf::AMFPropertyInfo* props = nullptr;
-                encoder->GetPropertyInfo(AMF_PARAM_RATE_CONTROL_METHOD(prm->codec), &props);
-                bool rateControlSupported = false;
-                for (auto penum = props->pEnumDescription; !rateControlSupported && penum->name; penum++) {
-                    if (penum->value == prm->rateControl) rateControlSupported = true;
-                }
-                if (!rateControlSupported) {
-                    message += strsprintf(_T("GPU #%d (%s) does not support %s %s mode.\n"), (*gpu)->id(), (*gpu)->name().c_str(),
-                        CodecToStr(prm->codec).c_str(), get_cx_desc(get_rc_method(prm->codec), prm->rateControl));
+            amf::AMF_ACCELERATION_TYPE accelType = encoderCaps->GetAccelerationType();
+            PrintMes(RGY_LOG_DEBUG, _T("  acceleration: %s.\n"), AccelTypeToString(accelType).c_str());
+            if (accelType != amf::AMF_ACCEL_GPU && accelType != amf::AMF_ACCEL_HARDWARE) {
+                message += strsprintf(_T("GPU #%d (%s) does not HW Acceleration of %s encoding.\n"),
+                    (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
+                gpu = gpuList.erase(gpu);
+                continue;
+            }
+
+            //HEVCについてはmain10が無効だと返す場合があるので、チェックしないようにする
+            if (prm->codec != RGY_CODEC_HEVC || !IGNORE_HEVC_PROFILE_CAP) {
+                int maxProfile = 0;
+                encoderCaps->GetProperty(AMF_PARAM_CAP_MAX_PROFILE(prm->codec), &maxProfile);
+                PrintMes(RGY_LOG_DEBUG, _T("  Max Profile: %s.\n"), get_cx_desc(get_profile_list(prm->codec), maxProfile));
+                if (prm->codecParam[prm->codec].nProfile > maxProfile) {
+                    message += strsprintf(_T("GPU #%d (%s) does not support %s %s profile (max supported: %s).\n"),
+                                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                                        get_cx_desc(get_profile_list(prm->codec), prm->codecParam[prm->codec].nProfile),
+                                        get_cx_desc(get_profile_list(prm->codec), maxProfile));
                     gpu = gpuList.erase(gpu);
                     continue;
                 }
             }
-            encoder->Clear();
+
+            int maxLevel = 0;
+            encoderCaps->GetProperty(AMF_PARAM_CAP_MAX_LEVEL(prm->codec), &maxLevel);
+            PrintMes(RGY_LOG_DEBUG, _T("  Max Level: %s.\n"), get_cx_desc(get_level_list(prm->codec), maxLevel));
+            if (prm->codecParam[prm->codec].nLevel > maxLevel) {
+                message += strsprintf(_T("GPU #%d (%s) does not support %s Level %s (max supported: %s).\n"),
+                    (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                    get_cx_desc(get_level_list(prm->codec), prm->codecParam[prm->codec].nLevel),
+                    get_cx_desc(get_level_list(prm->codec), maxLevel));
+                gpu = gpuList.erase(gpu);
+                continue;
+            }
+
+            if (false) { // 入力フォーマットについてはチェックしないようにする
+                amf::AMFIOCapsPtr inputCaps;
+                if (encoderCaps->GetInputCaps(&inputCaps) == AMF_OK) {
+                    bool formatSupported = false;
+                    int numOfFormats = inputCaps->GetNumOfFormats();
+                    for (int i = 0; i < numOfFormats; i++) {
+                        amf::AMF_SURFACE_FORMAT format;
+                        amf_bool native = false;
+                        if (inputCaps->GetFormatAt(i, &format, &native) == AMF_OK && format == formatIn) {
+                            formatSupported = true;
+                            break;
+                        }
+                    }
+                    if (!formatSupported) {
+                        message += strsprintf(_T("GPU #%d (%s) [%s] does not support input format %s.\n"),
+                            (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                            m_pTrace->SurfaceGetFormatName(formatIn));
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+                }
+            }
+
+            amf::AMFIOCapsPtr outputCaps;
+            if (encoderCaps->GetOutputCaps(&outputCaps) == AMF_OK) {
+                if (false) {
+                    int minWidth, maxWidth;
+                    outputCaps->GetWidthRange(&minWidth, &maxWidth);
+                    if (m_encWidth < minWidth || maxWidth < m_encWidth) {
+                        message += strsprintf(_T("GPU #%d (%s) [%s] does not support width %d (supported %d - %d).\n"),
+                            (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                            m_encWidth, minWidth, maxWidth);
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+
+                    int minHeight, maxHeight;
+                    outputCaps->GetHeightRange(&minHeight, &maxHeight);
+                    if (m_encHeight < minHeight || maxHeight < m_encHeight) {
+                        message += strsprintf(_T("GPU #%d (%s) [%s] does not support height %d (supported %d - %d).\n"),
+                            (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                            m_encHeight, minHeight, maxHeight);
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+                }
+                if (false) { // 出力フォーマットについてはチェックしないようにする
+                    bool formatSupported = false;
+                    int numOfFormats = outputCaps->GetNumOfFormats();
+                    for (int i = 0; i < numOfFormats; i++) {
+                        amf::AMF_SURFACE_FORMAT format;
+                        amf_bool native = false;
+                        if (outputCaps->GetFormatAt(i, &format, &native) == AMF_OK && format == formatOut) {
+                            formatSupported = true;
+                            break;
+                        }
+                    }
+                    if (!formatSupported) {
+                        message += strsprintf(_T("GPU #%d (%s) [%s] does not support ouput format %s.\n"),
+                            (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str(),
+                            m_pTrace->SurfaceGetFormatName(formatOut));
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+                }
+                //インタレ保持のチェック
+                const bool interlacedEncoding =
+                    (prm->input.picstruct & RGY_PICSTRUCT_INTERLACED)
+                    && !prm->vpp.afs.enable
+                    && !prm->vpp.nnedi.enable
+                    && !prm->vpp.yadif.enable
+                    && !prm->vpp.decomb.enable;
+                if (interlacedEncoding
+                    && !outputCaps->IsInterlacedSupported()) {
+                    message += strsprintf(_T("GPU #%d (%s) does not support %s interlaced encoding.\n"),
+                        (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
+                    gpu = gpuList.erase(gpu);
+                    continue;
+                }
+            }
+            if (encBitdepth > 8) {
+                if (encBitdepth == 10) {
+                    bool Support10bitDepth = false;
+                    if (encoderCaps->GetProperty(VCEDevice::CAP_10BITDEPTH, &Support10bitDepth) != AMF_OK) {
+                        Support10bitDepth = false;
+                    }
+                    if (!Support10bitDepth) {
+                        message += strsprintf(_T("GPU #%d (%s) does not support 10bit depth %s encoding.\n"), (*gpu)->id(), (*gpu)->name().c_str(), CodecToStr(prm->codec).c_str());
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+                } else {
+                    PrintMes(RGY_LOG_ERROR, _T("Unsupported output bit depth: %d.\n"), encBitdepth);
+                    return RGY_ERR_UNSUPPORTED;
+                }
+            }
+
+            { //レート制御のチェック
+                amf::AMFComponentPtr encoder;
+                if (m_pFactory->CreateComponent((*gpu)->context(), codec_rgy_to_enc(prm->codec), &encoder) == AMF_OK) {
+                    const amf::AMFPropertyInfo* props = nullptr;
+                    encoder->GetPropertyInfo(AMF_PARAM_RATE_CONTROL_METHOD(prm->codec), &props);
+                    bool rateControlSupported = false;
+                    for (auto penum = props->pEnumDescription; !rateControlSupported && penum->name; penum++) {
+                        if (penum->value == prm->rateControl) rateControlSupported = true;
+                    }
+                    if (!rateControlSupported) {
+                        message += strsprintf(_T("GPU #%d (%s) does not support %s %s mode.\n"), (*gpu)->id(), (*gpu)->name().c_str(),
+                            CodecToStr(prm->codec).c_str(), get_cx_desc(get_rc_method(prm->codec), prm->rateControl));
+                        gpu = gpuList.erase(gpu);
+                        continue;
+                    }
+                }
+                encoder->Clear();
+            }
         }
 
         if (m_pFileReader->getInputCodec() != RGY_CODEC_UNKNOWN) {
@@ -3250,6 +3425,8 @@ RGY_ERR VCECore::initPipeline(VCEParam *prm) {
     }
     if (m_pEncoder) {
         m_pipelineTasks.push_back(std::make_unique<PipelineTaskAMFEncode>(m_pEncoder, m_encCodec, m_params, m_dev->context(), 1, m_timecode.get(), m_encTimestamp.get(), m_outputTimebase, m_hdr10plus.get(), m_dovirpu.get(), m_pLog));
+    } else {
+        m_pipelineTasks.push_back(std::make_unique<PipelineTaskOutputRaw>(m_dev->context(), 1, m_pLog));
     }
 
     if (m_pipelineTasks.size() == 0) {
@@ -4062,10 +4239,6 @@ tstring VCECore::GetEncoderParam() {
     getCPUInfo(cpu_info);
     tstring gpu_info = m_dev->getGPUInfo();
 
-    uint32_t nMotionEst = 0x0;
-    nMotionEst |= GetPropertyInt(AMF_PARAM_MOTION_HALF_PIXEL(m_encCodec)) ? VCE_MOTION_EST_HALF : 0;
-    nMotionEst |= GetPropertyInt(AMF_PARAM_MOTION_QUARTERPIXEL(m_encCodec)) ? VCE_MOTION_EST_QUATER | VCE_MOTION_EST_HALF : 0;
-
     mes += strsprintf(_T("%s\n"), get_encoder_version());
 #if defined(_WIN32) || defined(_WIN64)
     OSVERSIONINFOEXW osversioninfo = { 0 };
@@ -4103,12 +4276,14 @@ tstring VCECore::GetEncoderParam() {
         (int)AMF_GET_MAJOR_VERSION(m_AMFRuntimeVersion), (int)AMF_GET_MINOR_VERSION(m_AMFRuntimeVersion), (int)AMF_GET_SUBMINOR_VERSION(m_AMFRuntimeVersion),
         AMF_VERSION_MAJOR, AMF_VERSION_MINOR, AMF_VERSION_RELEASE);
 
-    if (GetPropertyBool(AMF_PARAM_ENABLE_SMART_ACCESS_VIDEO(m_encCodec))) {
-        mes += _T("Smart Access:  on\n");
-    }
-    if (m_encCodec == RGY_CODEC_AV1 || m_encCodec == RGY_CODEC_HEVC) {
-        if (GetPropertyBool(AMF_PARAM_MULTI_HW_INSTANCE_ENCODE(m_encCodec))) {
-            mes += _T("Multi Instance:on\n");
+    if (m_pEncoder) {
+        if (GetPropertyBool(AMF_PARAM_ENABLE_SMART_ACCESS_VIDEO(m_encCodec))) {
+            mes += _T("Smart Access:  on\n");
+        }
+        if (m_encCodec == RGY_CODEC_AV1 || m_encCodec == RGY_CODEC_HEVC) {
+            if (GetPropertyBool(AMF_PARAM_MULTI_HW_INSTANCE_ENCODE(m_encCodec))) {
+                mes += _T("Multi Instance:on\n");
+            }
         }
     }
     auto inputInfo = m_pFileReader->GetInputFrameInfo();
@@ -4148,21 +4323,34 @@ tstring VCECore::GetEncoderParam() {
             mes += strsprintf(_T("%s%s\n"), m, m_videoQualityMetric->GetInputMessage().c_str());
         }
     }
-    mes += strsprintf(_T("Output:        %s  %s @ Level %s%s\n"),
-        CodecToStr(m_encCodec).c_str(),
-        getPropertyDesc(AMF_PARAM_PROFILE(m_encCodec), get_profile_list(m_encCodec)).c_str(),
-        getPropertyDesc(AMF_PARAM_PROFILE_LEVEL(m_encCodec), get_level_list(m_encCodec)).c_str(),
-        (m_encCodec == RGY_CODEC_HEVC) ? (tstring(_T(" (")) + getPropertyDesc(AMF_VIDEO_ENCODER_HEVC_TIER, get_tier_list(m_encCodec)) + _T(" tier)")).c_str() : _T(""));
-    const AMF_VIDEO_ENCODER_SCANTYPE_ENUM scan_type = (m_encCodec == RGY_CODEC_H264) ? (AMF_VIDEO_ENCODER_SCANTYPE_ENUM)GetPropertyInt(AMF_VIDEO_ENCODER_SCANTYPE) : AMF_VIDEO_ENCODER_SCANTYPE_PROGRESSIVE;
-    auto frameRate = GetPropertyRate(AMF_PARAM_FRAMERATE(m_encCodec));
-    int64_t outWidth = 0, outHeight = 0;
-    m_params.GetParam(VCE_PARAM_KEY_OUTPUT_WIDTH, outWidth);
-    m_params.GetParam(VCE_PARAM_KEY_OUTPUT_HEIGHT, outHeight);
-    mes += strsprintf(_T("               %dx%d%s %d:%d %0.3ffps (%d/%dfps)\n"),
-        (int)outWidth, (int)outHeight,
-        scan_type == AMF_VIDEO_ENCODER_SCANTYPE_INTERLACED ? _T("i") : _T("p"),
-        m_sar.n(), m_sar.d(),
-        frameRate.num / (double)frameRate.den, frameRate.num, frameRate.den);
+    if (m_pEncoder) {
+        mes += strsprintf(_T("Output:        %s  %s @ Level %s%s\n"),
+            CodecToStr(m_encCodec).c_str(),
+            getPropertyDesc(AMF_PARAM_PROFILE(m_encCodec), get_profile_list(m_encCodec)).c_str(),
+            getPropertyDesc(AMF_PARAM_PROFILE_LEVEL(m_encCodec), get_level_list(m_encCodec)).c_str(),
+            (m_encCodec == RGY_CODEC_HEVC) ? (tstring(_T(" (")) + getPropertyDesc(AMF_VIDEO_ENCODER_HEVC_TIER, get_tier_list(m_encCodec)) + _T(" tier)")).c_str() : _T(""));
+        const AMF_VIDEO_ENCODER_SCANTYPE_ENUM scan_type = (m_encCodec == RGY_CODEC_H264) ? (AMF_VIDEO_ENCODER_SCANTYPE_ENUM)GetPropertyInt(AMF_VIDEO_ENCODER_SCANTYPE) : AMF_VIDEO_ENCODER_SCANTYPE_PROGRESSIVE;
+        auto frameRate = GetPropertyRate(AMF_PARAM_FRAMERATE(m_encCodec));
+        int64_t outWidth = 0, outHeight = 0;
+        m_params.GetParam(VCE_PARAM_KEY_OUTPUT_WIDTH, outWidth);
+        m_params.GetParam(VCE_PARAM_KEY_OUTPUT_HEIGHT, outHeight);
+        mes += strsprintf(_T("               %dx%d%s %d:%d %0.3ffps (%d/%dfps)\n"),
+            (int)outWidth, (int)outHeight,
+            scan_type == AMF_VIDEO_ENCODER_SCANTYPE_INTERLACED ? _T("i") : _T("p"),
+            m_sar.n(), m_sar.d(),
+            frameRate.num / (double)frameRate.den, frameRate.num, frameRate.den);
+    } else {
+        auto [err, outputVideoInfo] = GetOutputVideoInfo();
+        if (err != RGY_ERR_NONE) {
+            PrintMes(RGY_LOG_ERROR, _T("failed to get output video info.\n"));
+            return mes;
+        }
+        mes += strsprintf(_T("Output:        %dx%d%s %d:%d %0.3ffps (%d/%dfps)\n"),
+            (int)outputVideoInfo.dstWidth, (int)outputVideoInfo.dstHeight,
+            outputVideoInfo.picstruct == RGY_PICSTRUCT_INTERLACED ? _T("i") : _T("p"),
+            outputVideoInfo.sar[0], outputVideoInfo.sar[1],
+            outputVideoInfo.fpsN / (double)outputVideoInfo.fpsD, outputVideoInfo.fpsN, outputVideoInfo.fpsD);
+    }
     if (m_pFileWriter) {
         auto mesSplitted = split(m_pFileWriter->GetOutputMessage(), _T("\n"));
         for (auto line : mesSplitted) {
@@ -4181,6 +4369,10 @@ tstring VCECore::GetEncoderParam() {
             }
         }
     }
+    if (!m_pEncoder) {
+        return mes;
+    }
+
     mes += strsprintf(_T("Quality:       %s\n"), getPropertyDesc(AMF_PARAM_QUALITY_PRESET(m_encCodec), get_quality_preset(m_encCodec)).c_str());
     if (GetPropertyInt(AMF_PARAM_RATE_CONTROL_METHOD(m_encCodec)) == get_rc_method(m_encCodec)[0].value) {
         mes += strsprintf(_T("CQP:           %s:%d, %s:%d"),
@@ -4253,6 +4445,10 @@ tstring VCECore::GetEncoderParam() {
     }
     mes += strsprintf(_T("Ref frames:    %d frames\n"), GetPropertyInt(AMF_PARAM_MAX_NUM_REFRAMES(m_encCodec)));
     mes += strsprintf(_T("LTR frames:    %d frames\n"), GetPropertyInt(AMF_PARAM_MAX_LTR_FRAMES(m_encCodec)));
+
+    uint32_t nMotionEst = 0x0;
+    nMotionEst |= GetPropertyInt(AMF_PARAM_MOTION_HALF_PIXEL(m_encCodec)) ? VCE_MOTION_EST_HALF : 0;
+    nMotionEst |= GetPropertyInt(AMF_PARAM_MOTION_QUARTERPIXEL(m_encCodec)) ? VCE_MOTION_EST_QUATER | VCE_MOTION_EST_HALF : 0;
     mes += strsprintf(_T("Motion Est:    %s\n"), get_cx_desc(list_mv_presicion, nMotionEst));
     if (m_encCodec == RGY_CODEC_H264 || m_encCodec == RGY_CODEC_HEVC) {
         mes += strsprintf(_T("Slices:        %d\n"), GetPropertyInt(AMF_PARAM_SLICES_PER_FRAME(m_encCodec)));

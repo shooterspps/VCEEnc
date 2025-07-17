@@ -3,7 +3,7 @@ name: Build Windows Releases
 on:
   push:
     branches:
-      - master
+      - AU2
       - actions
     tags:
       - '*'
@@ -84,7 +84,7 @@ jobs:
           mkdir VCEEncC_Release
           copy _build\${{ matrix.platform }}\RelStatic\VCEEncC*.exe VCEEncC_Release
           copy _build\${{ matrix.platform }}\RelStatic\*.dll VCEEncC_Release
-          7z a -mx9 VCEEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z .\VCEEncC_Release\*
+          7z a -mx9 VCEEncC_${{ matrix.platform }}.7z .\VCEEncC_Release\*
 
       - name: Check dll
         run: |
@@ -95,12 +95,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         id: check_ver
         run: |
-          powershell "$ver = (Get-ItemProperty .\VCEEncC_Release\VCEEncC*.exe).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\VCEEncC_Release\VCEEncC*.exe).VersionInfo.FileVersion; if ($ver -eq ) { exit 0; } exit 1;"
 
       - name: Calc hash
         id: calc_hash
         run: |
-          7z h -scrc* VCEEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
+          7z h -scrc* VCEEncC_${{ matrix.platform }}.7z
 
       - name: Upload Release Asset
         id: upload-release-asset 
@@ -109,13 +109,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: VCEEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
+          files: VCEEncC_${{ matrix.platform }}.7z
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VCEEncC_release_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}
-          path: VCEEncC_${{ needs.get_version_name.outputs.version_name }}_${{ matrix.platform }}.7z
+          name: VCEEncC_release_${{ matrix.platform }}
+          path: VCEEncC_${{ matrix.platform }}.7z
 
 
   upload_aviutl_release:
@@ -164,83 +164,100 @@ jobs:
       - name: Download VCEEncC Win32
         uses: actions/download-artifact@v4
         with:
-          name: VCEEncC_release_${{ needs.get_version_name.outputs.version_name }}_Win32
-          path: VCEEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
+          name: VCEEncC_release_Win32
+          path: VCEEncC_Win32.7z
 
       - name: Download VCEEncC x64
         uses: actions/download-artifact@v4
         with:
-          name: VCEEncC_release_${{ needs.get_version_name.outputs.version_name }}_x64
-          path: VCEEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
+          name: VCEEncC_release_x64
+          path: VCEEncC_x64.7z
           
       - name: Create package
         id: archieve
         run: |
-          mkdir Aviutl_VCEEnc_release
-          7z x -oAviutl_VCEEnc_release\ auo_setup.zip
-          mkdir Aviutl_VCEEnc_release\exe_files\VCEEncC
-          mkdir Aviutl_VCEEnc_release\exe_files\VCEEncC\x86
-          mkdir Aviutl_VCEEnc_release\exe_files\VCEEncC\x64
-          7z x -oAviutl_VCEEnc_release\exe_files\VCEEncC\x86\ VCEEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
-          7z x -oAviutl_VCEEnc_release\exe_files\VCEEncC\x64\ VCEEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
-          copy /y _build\Win32\Release\VCEEnc.auo Aviutl_VCEEnc_release\plugins\
-          copy /y VCEEnc\VCEEnc.ini Aviutl_VCEEnc_release\plugins\
-          copy /y VCEEnc\VCEEnc.en.ini Aviutl_VCEEnc_release\plugins\
-          copy /y VCEEnc\VCEEnc.zh.ini Aviutl_VCEEnc_release\plugins\
-          copy /y VCEEnc\auo_setup.ini Aviutl_VCEEnc_release\exe_files\
-          copy /y VCEEnc\VCEEnc_readme.txt Aviutl_VCEEnc_release\
-          echo D | xcopy /y /e VCEEnc\stg Aviutl_VCEEnc_release\plugins\VCEEnc_stg
-          dir /b /s Aviutl_VCEEnc_release\
-          7z a -mx9 Aviutl_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.zip .\Aviutl_VCEEnc_release\*
+          mkdir VCEEnc_release
+          7z x -oVCEEnc_release\ auo_setup.zip
+          mkdir VCEEnc_release\exe_files\VCEEncC
+          mkdir VCEEnc_release\exe_files\VCEEncC\x86
+          mkdir VCEEnc_release\exe_files\VCEEncC\x64
+          7z x -oVCEEnc_release\exe_files\VCEEncC\x86\ VCEEncC_Win32.7z
+          7z x -oVCEEnc_release\exe_files\VCEEncC\x64\ VCEEncC_x64.7z
+          copy /y _build\Win32\Release\VCEEnc.auo VCEEnc_release\plugins\
+          copy /y VCEEnc\VCEEnc.ini VCEEnc_release\plugins\
+          copy /y VCEEnc\VCEEnc.en.ini VCEEnc_release\plugins\
+          copy /y VCEEnc\VCEEnc.zh.ini VCEEnc_release\plugins\
+          copy /y VCEEnc\auo_setup.ini VCEEnc_release\exe_files\
+          copy /y VCEEnc\VCEEnc_readme.txt VCEEnc_release\
+          echo D | xcopy /y /e VCEEnc\stg VCEEnc_release\plugins\VCEEnc_stg
+          dir /b /s VCEEnc_release\
+          7z a -mx9 VCEEnc.zip .\VCEEnc_release\*
 
-          mkdir Aviutl_VCEEnc_release2
-          mkdir Aviutl_VCEEnc_release2\Plugin
-          mkdir Aviutl_VCEEnc_release2\Plugin\exe_files
-          xcopy /e /y Aviutl_VCEEnc_release\exe_files Aviutl_VCEEnc_release2\Plugin\exe_files
-          xcopy /e /y Aviutl_VCEEnc_release\plugins   Aviutl_VCEEnc_release2\Plugin
-          del Aviutl_VCEEnc_release2\Plugin\auo_setup.auf
-          del Aviutl_VCEEnc_release2\Plugin\exe_files\auo_setup.exe
-          rmdir /s /q Aviutl_VCEEnc_release2\Plugin\exe_files\VCEEncC\x86
-          7z a -t7z -m0=lzma -mx=9 -mmt Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.7z .\Aviutl_VCEEnc_release2\*
-          copy /b VCEEnc\7zSD.noadmin.sfx + VCEEnc\7zInstallerConfig.txt + Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.7z Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          mkdir VCEEnc_release2
+          mkdir VCEEnc_release2\Plugin
+          mkdir VCEEnc_release2\Plugin\exe_files
+          xcopy /e /y VCEEnc_release\exe_files VCEEnc_release2\Plugin\exe_files
+          xcopy /e /y VCEEnc_release\plugins   VCEEnc_release2\Plugin
+          del VCEEnc_release2\Plugin\auo_setup.auf
+          del VCEEnc_release2\Plugin\exe_files\auo_setup.exe
+          rmdir /s /q VCEEnc_release2\Plugin\exe_files\VCEEncC\x86
+          7z a -t7z -m0=lzma -mx=9 -mmt Aviutl2_VCEEnc.7z .\VCEEnc_release2\*
+          copy /b VCEEnc\7zSD.noadmin.sfx + VCEEnc\7zInstallerConfig.txt + Aviutl2_VCEEnc.7z Aviutl2_VCEEnc_install.exe
 
       - name: Check Version
         id: check_ver
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          powershell "$ver = (Get-ItemProperty .\Aviutl_VCEEnc_release\plugins\VCEEnc.auo).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\VCEEnc_release\plugins\VCEEnc.auo).VersionInfo.FileVersion; if ($ver -eq ) { exit 0; } exit 1;"
 
       - name: Check dll
         id: check_dll
         run: |
-          "Aviutl_VCEEnc_release\exe_files\VCEEncC\x86\VCEEncC.exe" --check-avcodec-dll
-          "Aviutl_VCEEnc_release\exe_files\VCEEncC\x64\VCEEncC64.exe" --check-avcodec-dll
+          "VCEEnc_release\exe_files\VCEEncC\x86\VCEEncC.exe" --check-avcodec-dll
+          "VCEEnc_release\exe_files\VCEEncC\x64\VCEEncC64.exe" --check-avcodec-dll
 
       - name: Calc hash
         id: calc_hash
         run: |
-          7z h -scrc* Aviutl_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.zip
-          7z h -scrc* Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          7z h -scrc* VCEEnc.zip
+          7z h -scrc* Aviutl2_VCEEnc_install.exe
+
+      - name: delete release
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          tag_name: new
+          delete_release: true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: latest version
+          tag_name: new
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Upload Release Asset
         id: upload-release-asset 
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: |
-            Aviutl_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.zip
-            Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./VCEEnc.zip
+          asset_name: VCEEnc.zip
+          asset_content_type: application/zip
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Release Asset
+        id: upload-release-asset-exe 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: Aviutl_VCEEnc_${{ needs.get_version_name.outputs.version_name }}
-          path: Aviutl_VCEEnc_${{ needs.get_version_name.outputs.version_name }}.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}
-          path: Aviutl2_VCEEnc_${{ needs.get_version_name.outputs.version_name }}_install.exe
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./Aviutl2_VCEEnc_install.exe
+          asset_name: Aviutl2_VCEEnc_install.exe
+          asset_content_type: application/x-msdownload

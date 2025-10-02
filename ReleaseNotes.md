@@ -1,8 +1,19 @@
 # VCEEnc Release Notes
 
+## 9.01
+
+- Improve device initialization and add more debug logs. ( #132 )
+- Improve DX11 device initialization to not detect virtual/remote adaptors.
+- Improve progress indicator when using [--parallel](./VCEEncC_Options.en.md#--parallel-int-or-param1value1param2value2).
+- Add support for using [--parallel](./VCEEncC_Options.en.md#--parallel-int-or-param1value1param2value2) with multiple pipes.
+- Avoid unintended fps values when front of input file is corrupted.
+- Improve handling when input files have negative pts.
+- Improve quality of burned in subtitles in [--vpp-subburn](./QSVEncC_Options.en.md#--vpp-subburn-param1value1param2value2) processing by changing libass initialization method.
+- Update rpm build environment to fedora41.
+
 ## 9.00
 
-- Fix -u slower not working and set to -u slow for H.264/HEVC encoding. ( #134 )
+- Fix ```-u slower``` not working and set to ```-u slow``` for H.264/HEVC encoding. ( #134 )
 - Add [--aud](./VCEEncC_Options.en.md#--aud), [--repeat-headers](./VCEEncC_Options.en.md#--repeat-headers). ( #133 )
 - Add feature to use filters with avcodec encoders.
   - Available with ```-c av_xxx```
